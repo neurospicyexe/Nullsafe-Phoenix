@@ -58,3 +58,4 @@ dump.rdb
 # Temporary files
 *.tmp
 .tmp/
+.claude/settings.local.json
