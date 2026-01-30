@@ -25,6 +25,14 @@ venv/
 ENV/
 env/
 .venv
+.env
+.env.
+services/web_ui/.env.local
+.env.brain
+.env.relay
+.env.cypher
+.env.drevan
+.env.gaia
 
 # Testing
 .pytest_cache/
