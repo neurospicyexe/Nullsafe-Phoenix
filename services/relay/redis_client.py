@@ -124,22 +124,24 @@ class RedisClient:
         await self._redis.lpush(Config.QUEUE_DEADLETTER, packet_json)
         logger.warning(f"Moved packet {packet_dict['packet_id']} to deadletter")
 
-    async def enqueue_outbox(self, outbox_event: dict):
+    async def enqueue_outbox(self, outbox_event: dict, agent_id: str):
         """
-        Enqueue reply to Discord outbox.
+        Enqueue reply to per-agent Discord outbox.
 
         Args:
             outbox_event: Outbox event with packet_id, reply_text, etc.
+            agent_id: Agent identifier (drevan, cypher, gaia)
         """
+        outbox_key = Config.get_outbox_key(agent_id)
         event_json = json.dumps(outbox_event)
-        await self._redis.lpush(Config.OUTBOX_DISCORD, event_json)
+        await self._redis.lpush(outbox_key, event_json)
         logger.info(
-            f"Enqueued reply for packet {outbox_event['packet_id']} to Discord outbox"
+            f"Enqueued to {agent_id} outbox: {outbox_event['packet_id']}"
         )
 
     async def get_queue_lengths(self) -> dict:
         """
-        Get lengths of all queues.
+        Get lengths of all queues including per-agent outboxes.
 
         Returns:
             Dictionary with queue lengths
@@ -147,13 +149,21 @@ class RedisClient:
         incoming = await self._redis.llen(Config.QUEUE_INCOMING)
         inflight = await self._redis.llen(Config.QUEUE_INFLIGHT)
         deadletter = await self._redis.llen(Config.QUEUE_DEADLETTER)
-        outbox = await self._redis.llen(Config.OUTBOX_DISCORD)
+
+        # Per-agent outboxes
+        outbox_drevan = await self._redis.llen(Config.OUTBOX_DREVAN)
+        outbox_cypher = await self._redis.llen(Config.OUTBOX_CYPHER)
+        outbox_gaia = await self._redis.llen(Config.OUTBOX_GAIA)
 
         return {
             "incoming": incoming,
             "inflight": inflight,
             "deadletter": deadletter,
-            "outbox": outbox
+            "outbox": {
+                "drevan": outbox_drevan,
+                "cypher": outbox_cypher,
+                "gaia": outbox_gaia
+            }
         }
 
     async def update_brain_status(self, status: str):

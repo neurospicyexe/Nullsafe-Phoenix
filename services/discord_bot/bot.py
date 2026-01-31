@@ -7,13 +7,16 @@ ONLY component that talks to Discord API.
 Handles message ingress and outbox consumption.
 """
 
+import argparse
 import asyncio
 import logging
+import sys
 import uuid
 from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
 
 from shared.contracts import ThoughtPacket
 from services.discord_bot.config import Config
@@ -102,12 +105,9 @@ class PhoenixBot(commands.Bot):
         )
 
         try:
-            # Determine agent_id from channel mapping
+            # Use agent_id from config (each bot represents one agent)
             channel_id_str = str(message.channel.id)
-            agent_id = Config.CHANNEL_AGENT_MAPPING.get(
-                channel_id_str,
-                Config.DEFAULT_AGENT
-            )
+            agent_id = Config.AGENT_ID
 
             # Generate packet ID
             packet_id = str(uuid.uuid4())
@@ -212,10 +212,28 @@ class PhoenixBot(commands.Bot):
 
 async def main():
     """Main entry point."""
-    # Check for Discord token
-    if not Config.DISCORD_TOKEN:
-        logger.error("DISCORD_TOKEN environment variable not set")
-        return
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Phoenix Discord Bot")
+    parser.add_argument(
+        "--env", type=str, help="Path to .env file (e.g., .env.drevan)"
+    )
+    args = parser.parse_args()
+
+    # Load environment file
+    if args.env:
+        load_dotenv(args.env)
+        logger.info(f"Loaded environment from {args.env}")
+    else:
+        load_dotenv()
+        logger.info("Loaded environment from default .env file")
+
+    # Validate config
+    try:
+        Config.validate()
+        Config.print_safe_summary()
+    except Exception as e:
+        logger.error(f"Configuration validation failed: {e}")
+        sys.exit(1)
 
     # Create and run bot
     bot = PhoenixBot()

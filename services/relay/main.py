@@ -11,6 +11,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -20,12 +21,19 @@ from services.relay.redis_client import RedisClient
 from services.relay.brain_client import BrainClient
 from services.relay.drainer import QueueDrainer
 
+# Load environment variables
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Suppress verbose httpx and uvicorn access logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # Initialize clients (will be connected in lifespan)
 redis_client = RedisClient()
@@ -56,6 +64,17 @@ async def lifespan(app: FastAPI):
         await drainer.start()
 
         logger.info("Relay service started successfully")
+        logger.info("=" * 60)
+        logger.info("RELAY CONFIGURATION:")
+        logger.info(f"  Brain URL: {Config.BRAIN_SERVICE_URL}")
+        # Hide password in Redis URL if present
+        redis_display = Config.REDIS_URL.split('@')[-1] if '@' in Config.REDIS_URL else Config.REDIS_URL
+        logger.info(f"  Redis URL: {redis_display}")
+        logger.info(f"  Fast timeout: {Config.BRAIN_TIMEOUT_FAST}s")
+        logger.info(f"  Drainer timeout: {Config.BRAIN_TIMEOUT_DRAINER}s")
+        logger.info(f"  Drainer interval: {Config.DRAINER_INTERVAL}s")
+        logger.info(f"  Max retries: {Config.MAX_RETRIES}")
+        logger.info("=" * 60)
 
     except Exception as e:
         logger.error(f"Failed to start Relay service: {e}", exc_info=True)
@@ -255,8 +274,8 @@ async def _emit_to_outbox_safe(packet: ThoughtPacket, reply: AgentReply):
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    # Enqueue to outbox
-    await redis_client.enqueue_outbox(outbox_event)
+    # Enqueue to per-agent outbox
+    await redis_client.enqueue_outbox(outbox_event, reply.agent_id)
 
     logger.info(
         f"Emitted reply for packet {packet_id} to outbox (channel: {channel_id})"
@@ -265,4 +284,4 @@ async def _emit_to_outbox_safe(packet: ThoughtPacket, reply: AgentReply):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)

@@ -90,7 +90,18 @@ function updateStatus(data) {
         if (inflight) inflight.textContent = data.queue_lengths.inflight;
 
         const outbox = document.getElementById('queue-outbox');
-        if (outbox) outbox.textContent = data.queue_lengths.outbox;
+        if (outbox) {
+            // Handle nested outbox structure (per-agent)
+            if (typeof data.queue_lengths.outbox === 'object') {
+                const d = data.queue_lengths.outbox.drevan || 0;
+                const c = data.queue_lengths.outbox.cypher || 0;
+                const g = data.queue_lengths.outbox.gaia || 0;
+                outbox.textContent = `D:${d} C:${c} G:${g}`;
+            } else {
+                // Legacy format (single number)
+                outbox.textContent = data.queue_lengths.outbox;
+            }
+        }
 
         const deadletter = document.getElementById('queue-deadletter');
         if (deadletter) {

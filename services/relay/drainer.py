@@ -181,8 +181,8 @@ class QueueDrainer:
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
-        # Enqueue to outbox
-        await self.redis.enqueue_outbox(outbox_event)
+        # Enqueue to per-agent outbox
+        await self.redis.enqueue_outbox(outbox_event, reply.agent_id)
 
         logger.info(
             f"Emitted reply for packet {packet_id} to outbox "

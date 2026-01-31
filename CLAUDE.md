@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Nullsafe Phoenix v2 is a reliability-first agent orchestration system built on strict architectural separation. Three microservices communicate via Redis queues and HTTP, enabling a Discord bot to interact with AI agents running on a local workstation.
+Nullsafe Phoenix v2 is a reliability-first agent orchestration system built on strict architectural separation. Three microservices communicate via Redis queues and HTTP, enabling Discord bots to interact with AI agents running on a local workstation.
+
+**Current Status**: Phase 1 - Usable Kernel + Interfaces + Boot Discipline
 
 ## Development Commands
 
@@ -41,37 +43,53 @@ redis-server
 # 2. Start Brain service (Terminal 1)
 cd services/brain
 python main.py
-# Runs on http://localhost:8001
+# Runs on http://127.0.0.1:8001
 
 # 3. Start Relay service (Terminal 2)
 cd services/relay
 python main.py
-# Runs on http://localhost:8000
+# Runs on http://127.0.0.1:8000
 
-# 4. Start Discord Bot (Terminal 3)
-export DISCORD_TOKEN=your_token_here  # or 'set' on Windows
+# 4. Start Discord Bots (Terminals 3-5) - ONE PER AGENT
 cd services/discord_bot
-python bot.py
+
+# Terminal 3: Drevan bot
+python bot.py --env .env.drevan
+
+# Terminal 4: Cypher bot
+python bot.py --env .env.cypher
+
+# Terminal 5: Gaia bot
+python bot.py --env .env.gaia
+
+# 5. Start Web UI (Terminal 6) - Optional
+cd services/web_ui
+python main.py
+# Runs on http://127.0.0.1:5000
 ```
 
 ### Health Checks
 
 ```bash
 # Brain service
-curl http://localhost:8001/health
+curl http://127.0.0.1:8001/health
 
-# Relay service status (shows queue depths)
-curl http://localhost:8000/status
+# Relay service status (shows queue depths and brain status)
+curl http://127.0.0.1:8000/status
 ```
 
 ### Redis Queue Inspection
 
 ```bash
 # Check queue lengths
-redis-cli LLEN phx:incoming:queue
-redis-cli LLEN phx:incoming:inflight
-redis-cli LLEN phx:incoming:deadletter
-redis-cli LLEN phx:outbox:discord
+redis-cli LLEN phx:queue:incoming
+redis-cli LLEN phx:queue:inflight
+redis-cli LLEN phx:queue:deadletter
+
+# Check per-agent outboxes (Phase 1)
+redis-cli LLEN phx:outbox:discord:drevan
+redis-cli LLEN phx:outbox:discord:cypher
+redis-cli LLEN phx:outbox:discord:gaia
 
 # View thread routing mappings
 redis-cli KEYS "phx:thread:*"
@@ -81,23 +99,35 @@ redis-cli GET "phx:thread:<channel_id>"
 redis-cli FLUSHALL
 ```
 
+### Smoke Testing
+
+```bash
+# Run comprehensive end-to-end smoke test
+pwsh scripts/smoke_test.ps1
+
+# With custom URLs
+pwsh scripts/smoke_test.ps1 -RelayUrl http://127.0.0.1:8000 -BrainUrl http://127.0.0.1:8001
+```
+
 ## Architecture
 
 ### Service Boundaries (STRICT)
 
-The system has three services with strict separation of responsibilities:
+The system has four services with strict separation of responsibilities:
 
-1. **Discord Bot** ([services/discord_bot/](services/discord_bot/))
+1. **Discord Bots** ([services/discord_bot/](services/discord_bot/))
+   - THREE separate bot processes, one per agent (Drevan, Cypher, Gaia)
    - ONLY service that talks to Discord API
-   - Converts Discord messages → `ThoughtPacket`
-   - Consumes outbox and sends replies to Discord
+   - Each bot converts Discord messages → `ThoughtPacket` with its agent_id
+   - Each bot consumes ONLY its per-agent outbox queue
    - **Never**: Calls Brain directly, loads identities, runs LLM inference
 
 2. **Relay** ([services/relay/](services/relay/))
    - Always-on buffering layer on VPS
-   - Fast path: Immediate forward to Brain (5s timeout)
+   - Fast path: Immediate forward to Brain (5s timeout, configurable)
    - Queue path: Durable queueing with retry
    - Background drainer processes queue when Brain comes online
+   - Emits replies to per-agent outbox queues
    - **Never**: Calls Discord API, loads identities, runs LLM inference
 
 3. **Brain** ([services/brain/](services/brain/))
@@ -106,14 +136,25 @@ The system has three services with strict separation of responsibilities:
    - Runs on workstation (may be offline)
    - **Never**: Depends on Redis, talks to Discord
 
+4. **Web UI** ([services/web_ui/](services/web_ui/))
+   - Minimal interactive web interface
+   - Shows system status (brain online/offline, queue depths)
+   - Sends messages via Relay /ingest endpoint
+   - Displays immediate or queued replies
+   - **Never**: Calls Brain directly
+
 ### Message Flow
 
 ```
-Discord Message → Discord Bot → Relay → Brain
-                                  ↓       ↓
-                             Redis Queue  AgentReply
-                                  ↓          ↓
-                              Drainer → Outbox → Discord Bot → Discord
+Discord Message → Discord Bot (per-agent) → Relay → Brain
+                                              ↓       ↓
+                                         Redis Queue  AgentReply
+                                              ↓          ↓
+                                          Drainer → Per-Agent Outbox
+                                                    ↓        ↓        ↓
+                                              drevan   cypher   gaia
+                                                    ↓        ↓        ↓
+                                            Discord Bot → Discord
 ```
 
 ### Data Contracts
@@ -168,52 +209,188 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 - `phx:dedupe:outbox:<packet_id>` (24h) - Prevents duplicate Discord sends
 
 **Crash-safe queueing**: Uses Redis RPOPLPUSH for atomic operations:
-- Incoming queue: `phx:incoming:queue` → `phx:incoming:inflight` → process → delete
-- Outbox queue: `phx:outbox:discord` → `phx:outbox:inflight` → send → delete
+- Incoming queue: `phx:queue:incoming` → `phx:queue:inflight` → process → delete
+- Per-agent outboxes: `phx:outbox:discord:{agent}` → `phx:outbox:inflight` → send → delete
 
 **Dead-letter queues**: Failed packets (after max retries) go to:
-- `phx:incoming:deadletter`
+- `phx:queue:deadletter`
 - `phx:outbox:deadletter`
 
 **Observable state**: All logs include packet_id for tracing. Queue depths exposed via `/status` endpoint.
 
 ## Key Files
 
+### Service Implementation
 - [shared/contracts.py](shared/contracts.py) - Pydantic data models
 - [services/relay/main.py](services/relay/main.py) - Relay FastAPI app and ingestion logic
 - [services/relay/drainer.py](services/relay/drainer.py) - Background queue processor
+- [services/relay/config.py](services/relay/config.py) - Relay configuration with env loading
 - [services/brain/main.py](services/brain/main.py) - Brain FastAPI app
+- [services/brain/config.py](services/brain/config.py) - Brain configuration with validation
 - [services/brain/agents/router.py](services/brain/agents/router.py) - Thread routing and agent selection
 - [services/brain/identity/loader.py](services/brain/identity/loader.py) - YAML identity loading
 - [services/discord_bot/bot.py](services/discord_bot/bot.py) - Discord bot message handler
+- [services/discord_bot/config.py](services/discord_bot/config.py) - Bot configuration with per-agent settings
 - [services/discord_bot/outbox_consumer.py](services/discord_bot/outbox_consumer.py) - Outbox poller
+- [services/web_ui/main.py](services/web_ui/main.py) - Web UI FastAPI app
 - [pytest.ini](pytest.ini) - Test configuration with asyncio_mode=auto
+
+### Configuration Files
+- [services/relay/.env.example](services/relay/.env.example) - Relay environment template
+- [services/brain/.env.example](services/brain/.env.example) - Brain environment template
+- [services/discord_bot/.env.drevan](services/discord_bot/.env.drevan) - Drevan bot config
+- [services/discord_bot/.env.cypher](services/discord_bot/.env.cypher) - Cypher bot config
+- [services/discord_bot/.env.gaia](services/discord_bot/.env.gaia) - Gaia bot config
+
+### Testing & Validation
+- [scripts/smoke_test.ps1](scripts/smoke_test.ps1) - Comprehensive end-to-end smoke test
 
 ## Configuration
 
-Services use environment variables:
+All services use environment variables with fail-fast validation and safe startup summaries.
 
-**Relay:**
-- `REDIS_URL` (default: redis://localhost:6379)
-- `BRAIN_SERVICE_URL` (default: http://localhost:8001)
+### Relay Service
 
-**Brain:**
-- `OBSIDIAN_VAULT_PATH` - Path to Obsidian vault (for future write tool)
-- `IDENTITY_DIR` (default: ./services/brain/identity/data)
+**Required:**
+- `BRAIN_SERVICE_URL` - Brain service URL (default: http://127.0.0.1:8001)
+- `REDIS_URL` - Redis connection URL (default: redis://127.0.0.1:6379)
 
-**Discord Bot:**
-- `DISCORD_TOKEN` - Discord bot token (required)
-- `RELAY_URL` (default: http://localhost:8000)
-- `REDIS_URL` (default: redis://localhost:6379)
+**Optional (Performance Tuning):**
+- `BRAIN_TIMEOUT_FAST` - Fast path timeout in seconds (default: 5)
+- `BRAIN_TIMEOUT_DRAINER` - Drainer timeout in seconds (default: 30)
+- `DRAINER_INTERVAL` - Drainer check interval in seconds (default: 2)
+- `MAX_RETRIES` - Max retries before deadletter (default: 5)
+- `DEDUPE_TTL` - Deduplication TTL in seconds (default: 86400)
 
-## What's NOT Built Yet (Day One Scope)
+### Brain Service
 
-Day One is a minimal kernel. These are explicitly out of scope:
+**Required:**
+- `INFERENCE_ENABLED` - Enable LLM inference (default: false)
+
+**Optional:**
+- `IDENTITY_DIR` - Identity YAML directory (default: ./services/brain/identity/data)
+- `OBSIDIAN_VAULT_PATH` - Obsidian vault path (for future write tool)
+- `ANTHROPIC_API_KEY` - Anthropic API key (required if INFERENCE_ENABLED=true)
+- `OPENAI_API_KEY` - OpenAI API key (required if INFERENCE_ENABLED=true)
+- `DEEPSEEK_API_KEY` - DeepSeek API key (optional)
+
+### Discord Bot Service
+
+**Required:**
+- `DISCORD_TOKEN` - Discord bot token (unique per agent)
+- `AGENT_ID` - Agent identifier (drevan | cypher | gaia)
+- `OUTBOX_KEY` - Per-agent outbox queue key (e.g., phx:outbox:discord:drevan)
+
+**Optional:**
+- `RELAY_API_URL` - Relay service URL (default: http://127.0.0.1:8000)
+- `REDIS_URL` - Redis connection URL (default: redis://127.0.0.1:6379)
+
+### Web UI Service
+
+**Optional:**
+- `RELAY_API_URL` - Relay service URL (default: http://127.0.0.1:8000)
+
+## Phase 1 Implementation Status
+
+### ✅ Completed Features
+
+1. **Environment Standardization**
+   - All services use python-dotenv
+   - Startup validation with fail-fast errors
+   - Safe config summaries (no secrets logged)
+   - All defaults use 127.0.0.1 instead of localhost
+
+2. **Per-Agent Outboxes**
+   - Relay writes to `phx:outbox:discord:{agent_id}`
+   - Three separate outbox queues (drevan, cypher, gaia)
+   - Each Discord bot consumes only its own outbox
+
+3. **Multi-Bot Architecture**
+   - Three independent Discord bot processes
+   - Each bot represents one agent personality
+   - `--env` flag support for loading agent-specific config
+   - Each bot has unique Discord token and outbox queue
+
+4. **Web UI**
+   - Minimal interactive interface
+   - System status display (brain online/offline, queue depths)
+   - Agent selector (drevan, cypher, gaia)
+   - Message sending via Relay
+   - Immediate and queued reply handling
+
+5. **Configuration**
+   - All timeouts and retry counts are env-configurable
+   - Comprehensive .env.example files for all services
+   - Validation on startup prevents misconfiguration
+
+6. **Testing Infrastructure**
+   - Comprehensive smoke test script (scripts/smoke_test.ps1)
+   - Tests fast path, queue path, drainer, and deduplication
+   - 8 automated test scenarios
+
+### ⏳ Not Yet Implemented (Phase 1 Scope)
+
 - LLM inference (returns stub replies with identity anchors)
 - Obsidian write tool execution
 - Memory graphs
 - Web search / RAG
 - Cross-agent chatter
-- Web UI
+- Autonomous heartbeat/background tasks
+- Spotify/YouTube integration
 
 The current implementation validates architecture and message flow with stub replies that demonstrate identity selection.
+
+## Development Guidelines
+
+### Adding New Configuration
+
+1. Add env var to appropriate .env.example file
+2. Add to Config class with `os.getenv()` and default
+3. Update config validation if required
+4. Update safe config summary print
+5. Document in CLAUDE.md configuration section
+
+### Adding New Queue Types
+
+1. Add queue key constant to [services/relay/config.py](services/relay/config.py)
+2. Add queue length tracking to `get_queue_lengths()` in [services/relay/redis_client.py](services/relay/redis_client.py)
+3. Update [services/relay/main.py](services/relay/main.py) `/status` endpoint
+4. Update smoke test if needed
+5. Document in CLAUDE.md Redis Queue Inspection section
+
+### Adding New Agents
+
+1. Create YAML file in [services/brain/identity/data/](services/brain/identity/data/)
+2. Create .env.{agent} file in [services/discord_bot/](services/discord_bot/)
+3. Create Discord bot application and get token
+4. Update per-agent outbox keys in Relay config
+5. Start new bot process with `python bot.py --env .env.{agent}`
+
+## Troubleshooting
+
+### Services Won't Start
+
+- Check config validation errors in startup logs
+- Verify all required env vars are set
+- Ensure Redis is running: `redis-cli ping`
+- Check port conflicts (8000, 8001, 5000)
+
+### Messages Not Being Delivered
+
+- Check `/status` endpoint for queue depths
+- Verify Brain is online: `curl http://127.0.0.1:8001/health`
+- Check Discord bot is consuming correct outbox queue
+- Verify agent_id matches between packet and Discord bot config
+
+### Duplicate Messages
+
+- Check dedupe keys in Redis: `redis-cli KEYS "phx:dedupe:*"`
+- Verify packet_id is unique (UUID4)
+- Check outbox consumer logs for dedupe hits
+
+### Performance Issues
+
+- Tune timeouts via env vars (BRAIN_TIMEOUT_FAST, DRAINER_INTERVAL)
+- Check Redis latency: `redis-cli --latency`
+- Monitor queue depths via `/status` endpoint
+- Check for deadletter queue buildup
