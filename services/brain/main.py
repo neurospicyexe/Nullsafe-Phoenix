@@ -11,12 +11,17 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from shared.contracts import AgentReply, ThoughtPacket
+from services.brain.config import Config
 from services.brain.identity.loader import IdentityLoader
 from services.brain.agents.router import AgentRouter
+
+# Load environment variables
+load_dotenv(".env.brain")
 
 # Configure logging
 logging.basicConfig(
@@ -25,12 +30,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress verbose uvicorn access logs
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Nullsafe Phoenix Brain",
     version="v2-day-one",
     description="Workstation Brain service for agent intelligence"
 )
+
+# Validate configuration on startup
+try:
+    Config.validate()
+    Config.print_safe_summary()
+except Exception as e:
+    logger.error(f"Configuration validation failed: {e}")
+    raise
 
 # Initialize identity loader and agent router
 identity_loader = IdentityLoader()
@@ -92,4 +108,4 @@ async def chat(packet: ThoughtPacket) -> AgentReply:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8001, access_log=False)

@@ -162,7 +162,7 @@ class TestRedisClient:
 
     @pytest.mark.asyncio
     async def test_enqueue_outbox(self, redis_client):
-        """Test enqueuing to Discord outbox."""
+        """Test enqueuing to per-agent Discord outbox."""
         outbox_event = {
             "packet_id": "test-123",
             "agent_id": "cypher",
@@ -172,10 +172,12 @@ class TestRedisClient:
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
-        await redis_client.enqueue_outbox(outbox_event)
+        await redis_client.enqueue_outbox(outbox_event, "cypher")
 
         lengths = await redis_client.get_queue_lengths()
-        assert lengths["outbox"] == 1
+        assert lengths["outbox"]["cypher"] == 1
+        assert lengths["outbox"]["drevan"] == 0
+        assert lengths["outbox"]["gaia"] == 0
 
 
 class TestBrainClient:
