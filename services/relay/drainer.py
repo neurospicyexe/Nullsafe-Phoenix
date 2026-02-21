@@ -227,8 +227,3 @@ class QueueDrainer:
             # Move back to incoming queue
             await self.redis.enqueue_incoming(packet_dict)
             await self.redis.remove_from_inflight(packet_dict)
-
-            # Exponential backoff
-            backoff = min(2 ** new_retry_count, 60)
-            logger.debug(f"Waiting {backoff}s before next retry for {packet_id}")
-            await asyncio.sleep(backoff)
