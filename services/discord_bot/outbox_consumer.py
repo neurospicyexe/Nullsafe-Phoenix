@@ -235,19 +235,5 @@ class OutboxConsumer:
             self._retry_counts[packet_id] = new_retry_count
 
             # Move back to outbox (re-enqueue)
-            # Note: We need to reconstruct the event in queue
-            # For simplicity, we'll just remove from inflight and add back to outbox
             await self.redis.remove_from_inflight(event)
-
-            # Re-add to outbox (front of queue for immediate retry)
-            import json
-            event_json = json.dumps(event)
-            # Use lpush to add to front
-            await self.redis._redis.lpush(Config.OUTBOX_QUEUE, event_json)
-
-            # Exponential backoff
-            backoff = min(2 ** new_retry_count, 60)
-            logger.debug(
-                f"Waiting {backoff}s before next retry for packet {packet_id}"
-            )
-            await asyncio.sleep(backoff)
+            await self.redis.requeue_outbox(event)

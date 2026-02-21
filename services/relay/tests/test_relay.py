@@ -266,7 +266,7 @@ class TestDrainer:
         lengths = await redis_client.get_queue_lengths()
         assert lengths["incoming"] == 0
         assert lengths["inflight"] == 0
-        assert lengths["outbox"] == 1  # Reply emitted to outbox
+        assert lengths["outbox"]["cypher"] == 1  # Reply emitted to cypher outbox
 
     @pytest.mark.asyncio
     @respx.mock
@@ -355,7 +355,7 @@ class TestDrainer:
 
         # Check outbox - should still be empty (dedupe prevented emission)
         lengths = await redis_client.get_queue_lengths()
-        assert lengths["outbox"] == 0
+        assert lengths["outbox"]["cypher"] == 0  # Cypher outbox empty due to dedupe
 
 
 @pytest.mark.asyncio

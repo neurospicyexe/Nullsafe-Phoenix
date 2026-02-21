@@ -118,6 +118,20 @@ class DiscordRedisClient:
 
         logger.debug(f"Marked packet {packet_id} as sent to Discord")
 
+    async def requeue_outbox(self, event: dict):
+        """
+        Re-enqueue outbox event to front of queue for immediate retry.
+
+        Args:
+            event: Outbox event to re-enqueue
+        """
+        event_json = json.dumps(event)
+        await self._redis.lpush(Config.OUTBOX_QUEUE, event_json)
+
+        logger.debug(
+            f"Re-enqueued outbox event for packet {event['packet_id']} to front of queue"
+        )
+
     async def get_queue_lengths(self) -> dict:
         """
         Get lengths of outbox queues.
