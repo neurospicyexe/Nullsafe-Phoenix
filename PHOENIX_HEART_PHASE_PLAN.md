@@ -187,11 +187,17 @@ Deliverables:
 - This plan file
 - Initial domain vocabulary (identity, memory, bond, life, autonomy)
 - Service boundary decisions for WebMind v0
+- WebMind v0 boundary ADR (`WEBMIND_V0_DECISION.md`)
+- WebMind v0 schema/contracts sketch (`WEBMIND_V0_SCHEMA_SKETCH.md`)
 
 Exit criteria:
 
 - Clear names and boundaries
 - No ambiguity about what belongs to kernel vs heart layers
+
+Status:
+
+- Completed on February 24, 2026
 
 ### Slice 2: WebMind v0 (Read/Write Continuity + Session Handoffs)
 
@@ -381,4 +387,4 @@ For each slice:
 ## Change Log (Plan)
 
 - 2026-02-24: Initial Heart Phase planning file created after cross-repo context review (`NESTeqMemory`, `mind-cloud-free`, `MCP-Discord-Mobile`, `arcadia-open-source`)
-
+- 2026-02-24: Slice 1 completed with WebMind v0 boundary decision and schema/contracts sketch (`WEBMIND_V0_DECISION.md`, `WEBMIND_V0_SCHEMA_SKETCH.md`)
