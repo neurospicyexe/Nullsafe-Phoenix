@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 AgentId = Literal["drevan", "cypher", "gaia"]
 NoteAgentId = Literal["drevan", "cypher", "gaia", "swarm"]
 ActorType = Literal["human", "agent", "system"]
-SourceType = Literal["discord", "webui", "system", "autonomy", "api"]
+SourceType = Literal["discord", "webui", "system", "autonomy", "api", "synthesis_loop"]
 ThreadStatus = Literal["open", "paused", "resolved", "archived"]
 ThreadLane = Literal["bond", "life", "growth", "creative", "ops"]
 NoteType = Literal["continuity", "reflection", "memory_anchor", "ops"]
@@ -145,21 +145,24 @@ class ContinuityNoteSimpleRecord(BaseModel):
     """Stored note record (simplified -- used by limbic slice endpoints)."""
     note_id: str
     agent_id: NoteAgentId
-    note_text: str
+    note_text: str = Field(..., min_length=1)
     thread_key: Optional[str] = None
-    source: str
+    source: SourceType
     created_at: str
 
 
 class LimbicStateWriteRequest(BaseModel):
     """Request contract for Brain to write a synthesized swarm state."""
-    synthesis_source: str = Field(..., min_length=1)
+    synthesis_source: str = Field(..., min_length=1, max_length=100)
     active_concerns: List[str] = Field(default_factory=list)
     live_tensions: List[str] = Field(default_factory=list)
-    drift_vector: str = Field(..., min_length=1)
+    drift_vector: str = Field(..., min_length=1, max_length=300)
     open_questions: List[str] = Field(default_factory=list)
-    emotional_register: str = Field(..., min_length=1)
-    swarm_threads: List[str] = Field(default_factory=list)
+    emotional_register: str = Field(..., min_length=1, max_length=200)
+    swarm_threads: List[str] = Field(
+        default_factory=list,
+        description="Companion-owned threads sourced from dreams/loops. First-class content, not session recaps."
+    )
     companion_notes: Dict[str, str] = Field(default_factory=dict)
 
 
