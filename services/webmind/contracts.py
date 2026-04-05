@@ -151,6 +151,14 @@ class ContinuityNoteSimpleRecord(BaseModel):
     created_at: str
 
 
+class ContinuityNoteSimpleWriteRequest(BaseModel):
+    """Simplified note write request for Brain synthesis and conversation notes."""
+    agent_id: NoteAgentId
+    note_text: str = Field(..., min_length=1)
+    thread_key: Optional[str] = None
+    source: SourceType = Field(default="synthesis_loop")
+
+
 class LimbicStateWriteRequest(BaseModel):
     """Request contract for Brain to write a synthesized swarm state."""
     synthesis_source: str = Field(..., min_length=1, max_length=100)
