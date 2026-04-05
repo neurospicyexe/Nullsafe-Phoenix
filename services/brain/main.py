@@ -8,17 +8,21 @@ NEVER depends on Redis, NEVER talks to Discord.
 """
 
 import logging
+import os
+import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Dict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from shared.contracts import AgentReply, ThoughtPacket
 from services.brain.config import Config
 from services.brain.identity.loader import IdentityLoader
 from services.brain.agents.router import AgentRouter
+from services.brain.inference_client import InferenceClient
 
 # Load environment variables
 load_dotenv(".env.brain")
@@ -40,6 +44,14 @@ app = FastAPI(
     description="Workstation Brain service for agent intelligence"
 )
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.getenv("BRAIN_ALLOWED_ORIGIN", "http://127.0.0.1:8000")],
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+)
+
 # Validate configuration on startup
 try:
     Config.validate()
@@ -48,9 +60,25 @@ except Exception as e:
     logger.error(f"Configuration validation failed: {e}")
     raise
 
-# Initialize identity loader and agent router
+# Initialize identity loader
 identity_loader = IdentityLoader()
-agent_router = AgentRouter(identity_loader)
+
+# Initialize inference client if any backend is configured
+_inference_client = None
+if Config.LOCAL_INFERENCE_URL or Config.DEEPSEEK_API_KEY:
+    _inference_client = InferenceClient(
+        local_url=Config.LOCAL_INFERENCE_URL,
+        local_timeout=Config.LOCAL_INFERENCE_TIMEOUT,
+        deepseek_api_key=Config.DEEPSEEK_API_KEY,
+    )
+    logger.info(
+        f"Inference client ready (local={'yes' if Config.LOCAL_INFERENCE_URL else 'no'}, "
+        f"deepseek={'yes' if Config.DEEPSEEK_API_KEY else 'no'})"
+    )
+else:
+    logger.info("No inference backend configured -- stub replies active")
+
+agent_router = AgentRouter(identity_loader, inference_client=_inference_client)
 
 
 @app.get("/health")
@@ -87,25 +115,21 @@ async def chat(packet: ThoughtPacket) -> AgentReply:
         return reply
 
     except Exception as e:
+        error_id = str(_uuid.uuid4())[:8]
         logger.error(
-            f"Error processing packet {packet.packet_id}: {e}",
-            exc_info=True
+            f"Error {error_id} processing packet {packet.packet_id}: {e}",
+            exc_info=True,
         )
-
-        # Return error reply
         return AgentReply(
             packet_id=packet.packet_id,
             agent_id=packet.agent_id,
             status="error",
-            reply_text=f"Error processing message: {str(e)}",
-            trace={
-                "error": str(e),
-                "packet_id": packet.packet_id,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+            reply_text=f"Error processing message (ref: {error_id})",
+            trace={"error_id": error_id},
         )
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001, access_log=False)
+    brain_host = os.getenv("BRAIN_HOST", "127.0.0.1")
+    uvicorn.run(app, host=brain_host, port=8001, access_log=False)
