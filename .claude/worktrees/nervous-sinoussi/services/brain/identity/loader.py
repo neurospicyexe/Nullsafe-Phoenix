@@ -12,20 +12,15 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 
 class AgentIdentity(BaseModel):
     """Agent identity schema."""
-    # Reject unknown keys at load time -- a typo like `system_promt` must fail loudly,
-    # not silently fall through to stub fragment assembly.
-    model_config = ConfigDict(extra="forbid")
-
     name: str
     role: str
-    system_prompt: Optional[str] = None  # Full system prompt -- takes precedence over fragments when present
     anchors: List[str] = Field(default_factory=list)
     cadence: str = ""
     constraints: List[str] = Field(default_factory=list)
@@ -114,18 +109,12 @@ class IdentityLoader:
         """
         Construct deterministic prompt context from identity fields.
 
-        When system_prompt is present it is returned directly (real identity).
-        Falls back to fragment assembly for stub identities.
-
         Args:
             identity: Agent identity
 
         Returns:
             Formatted prompt context string
         """
-        if identity.system_prompt:
-            return identity.system_prompt.strip()
-
         lines = []
 
         # Name and role

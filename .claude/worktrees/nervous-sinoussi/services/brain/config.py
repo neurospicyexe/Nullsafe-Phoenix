@@ -18,10 +18,6 @@ class Config:
     # LLM inference
     INFERENCE_ENABLED: bool = os.getenv("INFERENCE_ENABLED", "false").lower() == "true"
 
-    # Local inference (LM Studio or any OpenAI-compatible endpoint)
-    LOCAL_INFERENCE_URL: Optional[str] = os.getenv("LOCAL_INFERENCE_URL")
-    LOCAL_INFERENCE_TIMEOUT: float = float(os.getenv("LOCAL_INFERENCE_TIMEOUT", "60"))
-
     # API Keys (optional until inference enabled)
     ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
@@ -36,11 +32,9 @@ class Config:
             raise ValueError(f"IDENTITY_DIR does not exist: {Config.IDENTITY_DIR}")
 
         if Config.INFERENCE_ENABLED:
-            has_local = bool(Config.LOCAL_INFERENCE_URL)
-            has_api = bool(Config.ANTHROPIC_API_KEY or Config.OPENAI_API_KEY or Config.DEEPSEEK_API_KEY)
-            if not (has_local or has_api):
+            if not (Config.ANTHROPIC_API_KEY or Config.OPENAI_API_KEY):
                 raise ValueError(
-                    "INFERENCE_ENABLED=true requires LOCAL_INFERENCE_URL, ANTHROPIC_API_KEY, OPENAI_API_KEY, or DEEPSEEK_API_KEY"
+                    "INFERENCE_ENABLED=true requires ANTHROPIC_API_KEY or OPENAI_API_KEY"
                 )
 
     @staticmethod
@@ -53,12 +47,6 @@ class Config:
             f"  Obsidian vault: {Config.OBSIDIAN_VAULT_PATH or 'Not configured'}"
         )
         print(f"  Inference enabled: {Config.INFERENCE_ENABLED}")
-        print(
-            f"  Local inference: {Config.LOCAL_INFERENCE_URL or '✗ Not configured'}"
-        )
-        print(
-            f"  Local timeout: {Config.LOCAL_INFERENCE_TIMEOUT}s"
-        )
         print(
             f"  Anthropic key: {'✓ Set' if Config.ANTHROPIC_API_KEY else '✗ Not set'}"
         )

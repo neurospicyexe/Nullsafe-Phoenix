@@ -12,11 +12,10 @@ Handles:
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict
 
 from shared.contracts import AgentReply, ThoughtPacket
 from services.brain.identity.loader import IdentityLoader
-from services.brain.inference_client import InferenceClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +38,14 @@ class AgentRouter:
         "gaia": re.compile(r"^gaia:\s*", re.IGNORECASE),
     }
 
-    def __init__(self, identity_loader: IdentityLoader, inference_client: Optional[InferenceClient] = None):
+    def __init__(self, identity_loader: IdentityLoader):
         """
         Initialize agent router.
 
         Args:
             identity_loader: Identity loader for loading agent identities
-            inference_client: Inference client for LLM completions (optional; falls back to stub)
         """
         self.identity_loader = identity_loader
-        self.inference_client = inference_client
         self._thread_routing: Dict[str, str] = {}  # thread_id -> active_agent_id
 
     def detect_override(self, message: str) -> tuple[str | None, str]:
@@ -140,22 +137,14 @@ class AgentRouter:
             f"Processing message for {active_agent_id} (identity version: {identity_version})"
         )
 
-        # Generate reply via inference or stub
-        if self.inference_client:
-            system_prompt = self.identity_loader.construct_prompt_context(identity)
-            reply_text, backend = await self.inference_client.complete(
-                system_prompt, cleaned_message, active_agent_id
-            )
-        else:
-            reply_text = self._generate_stub_reply(identity, cleaned_message)
-            backend = "stub"
+        # Generate identity-aware stub reply
+        reply_text = self._generate_stub_reply(identity, cleaned_message)
 
         # Construct trace with repro_stamp
         repro_stamp = {
             "packet_id": packet.packet_id,
             "agent_id": active_agent_id,
             "identity_version": identity_version,
-            "backend": backend,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "thread_routing": {
                 "thread_id": packet.thread_id,

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phoenix v2 - Web UI</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Left Panel: Status -->
+        <aside class="status-panel">
+            <h2>System Status</h2>
+
+            <div id="error-banner" class="error-banner" style="display: none;"></div>
+
+            <div class="status-section">
+                <h3>Relay</h3>
+                <div class="status-item">
+                    <span>Status:</span>
+                    <span id="relay-status" class="status-value">...</span>
+                </div>
+                <div class="status-item">
+                    <span>Redis:</span>
+                    <span id="redis-status" class="status-value">...</span>
+                </div>
+                <div class="status-item">
+                    <span>Drainer:</span>
+                    <span id="drainer-status" class="status-value">...</span>
+                </div>
+            </div>
+
+            <div class="status-section">
+                <h3>Brain</h3>
+                <div class="status-item">
+                    <span>Status:</span>
+                    <span id="brain-status" class="status-value">...</span>
+                </div>
+                <div class="status-item small">
+                    <span id="brain-url" class="status-url">...</span>
+                </div>
+            </div>
+
+            <div class="status-section">
+                <h3>Queues</h3>
+                <div class="status-item">
+                    <span>Incoming:</span>
+                    <span id="queue-incoming" class="status-value">0</span>
+                </div>
+                <div class="status-item">
+                    <span>Inflight:</span>
+                    <span id="queue-inflight" class="status-value">0</span>
+                </div>
+                <div class="status-item">
+                    <span>Outboxes:</span>
+                    <span id="queue-outbox" class="status-value">D:0 C:0 G:0</span>
+                </div>
+                <div class="status-item">
+                    <span>Deadletter:</span>
+                    <span id="queue-deadletter" class="status-value">0</span>
+                </div>
+            </div>
+
+            <div class="status-footer">
+                <small id="last-update">Last update: ...</small>
+            </div>
+        </aside>
+
+        <!-- Main Panel: Chat -->
+        <main class="chat-panel">
+            <header class="chat-header">
+                <h1>Phoenix v2 Chat</h1>
+
+                <div class="controls">
+                    <div class="control-group">
+                        <label for="agent-select">Agent</label>
+                        <select id="agent-select">
+                            <option value="cypher">Cypher</option>
+                            <option value="drevan">Drevan</option>
+                            <option value="gaia">Gaia</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="lane-select">Lane (Optional)</label>
+                        <select id="lane-select">
+                            <option value="">Default</option>
+                            <option value="immersion">Immersion</option>
+                            <option value="praxis">Praxis</option>
+                            <option value="translation">Translation</option>
+                            <option value="research">Research</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
+                        <label>Thread ID</label>
+                        <div id="thread-id" class="thread-id">...</div>
+                    </div>
+                </div>
+            </header>
+
+            <div id="error-message" class="error-message" style="display: none;"></div>
+
+            <div id="messages" class="messages">
+                <div class="welcome-message">
+                    No messages yet. Start a conversation!
+                </div>
+            </div>
+
+            <div class="input-area">
+                <textarea
+                    id="message-input"
+                    placeholder="Type your message... (Enter to send, Shift+Enter for new line)"
+                    rows="2"
+                ></textarea>
+                <button id="send-button" type="button">Send</button>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Relay API URL injected from server
+        const RELAY_API_URL = "{{ relay_api_url }}";
+    </script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
