@@ -16,6 +16,7 @@ sys.path.insert(0, str(project_root))
 
 from fastapi.testclient import TestClient
 import pytest
+import aiosqlite
 
 from services.webmind.contracts import (
     ContinuityNoteWriteRequest,
@@ -163,4 +164,39 @@ class TestLimbicStateContracts:
             created_at="2026-04-05T12:00:00+00:00",
         )
         assert r.agent_id == "swarm"
+
+
+
+@pytest.fixture
+async def tmp_db(tmp_path):
+    """Temporary SQLite database for tests."""
+    db_path = str(tmp_path / "test.db")
+    import services.webmind.database as db_module
+    original = db_module._DB_PATH
+    db_module._DB_PATH = db_path
+    await db_module.init_db()
+    yield db_path
+    db_module._DB_PATH = original
+
+
+class TestDatabaseModule:
+    """Test suite for database module initialization."""
+
+    async def test_init_db_creates_limbic_states_table(self, tmp_db):
+        """Verify limbic_states table is created."""
+        async with aiosqlite.connect(tmp_db) as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='limbic_states'"
+            )
+            row = await cursor.fetchone()
+        assert row is not None, "limbic_states table not created"
+
+    async def test_init_db_creates_continuity_notes_table(self, tmp_db):
+        """Verify continuity_notes table is created."""
+        async with aiosqlite.connect(tmp_db) as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='continuity_notes'"
+            )
+            row = await cursor.fetchone()
+        assert row is not None, "continuity_notes table not created"
 
