@@ -52,12 +52,12 @@ class TestHealthEndpoint:
 class TestStubEndpoints:
     """Validate route presence before repository implementation lands."""
 
-    def test_mind_orient_stub(self):
-        response = client.get("/mind/orient", params={"agent_id": "cypher"})
-        assert response.status_code == 501
-        detail = response.json()["detail"]
-        assert detail["endpoint"] == "mind_orient"
-        assert detail["agent_id"] == "cypher"
+    async def test_mind_orient_returns_200(self, test_app):
+        # orient is now implemented; returns 200 with empty state (no db writes here)
+        response = test_app.get("/mind/orient", params={"agent_id": "cypher"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["agent_id"] == "cypher"
 
     def test_mind_thread_upsert_stub_validates_contract(self):
         response = client.post(
@@ -199,4 +199,131 @@ class TestDatabaseModule:
             )
             row = await cursor.fetchone()
         assert row is not None, "continuity_notes table not created"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: Limbic endpoint tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+async def test_app(tmp_path):
+    import services.webmind.database as db_module
+    db_module._DB_PATH = str(tmp_path / "test.db")
+    await db_module.init_db()
+    from services.webmind.main import app
+    return TestClient(app)
+
+
+async def test_post_limbic_returns_201(test_app):
+    payload = {
+        "synthesis_source": "halseth:test",
+        "active_concerns": ["test concern"],
+        "live_tensions": [],
+        "drift_vector": "forward",
+        "open_questions": [],
+        "emotional_register": "neutral",
+        "swarm_threads": ["Cy thread"],
+        "companion_notes": {},
+    }
+    resp = test_app.post("/mind/limbic", json=payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "state_id" in data
+    assert data["drift_vector"] == "forward"
+
+
+async def test_get_limbic_current_returns_latest(test_app):
+    for drift in ["first", "second"]:
+        test_app.post("/mind/limbic", json={
+            "synthesis_source": "halseth:test",
+            "active_concerns": [],
+            "live_tensions": [],
+            "drift_vector": drift,
+            "open_questions": [],
+            "emotional_register": "neutral",
+            "swarm_threads": [],
+            "companion_notes": {},
+        })
+    resp = test_app.get("/mind/limbic/current")
+    assert resp.status_code == 200
+    assert resp.json()["drift_vector"] == "second"
+
+
+async def test_get_limbic_current_404_when_empty(test_app):
+    resp = test_app.get("/mind/limbic/current")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Notes endpoint tests
+# ---------------------------------------------------------------------------
+
+async def test_post_note_returns_201(test_app):
+    payload = {
+        "agent_id": "cypher",
+        "note_text": "Cy was working through the synthesis framing",
+        "source": "synthesis_loop",
+    }
+    resp = test_app.post("/mind/notes", json=payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "note_id" in data
+    assert data["agent_id"] == "cypher"
+
+
+async def test_post_note_swarm_agent_id(test_app):
+    payload = {
+        "agent_id": "swarm",
+        "note_text": "Swarm-level observation from synthesis",
+        "source": "synthesis_loop",
+    }
+    resp = test_app.post("/mind/notes", json=payload)
+    assert resp.status_code == 201
+
+
+async def test_get_notes_returns_list(test_app):
+    test_app.post("/mind/notes", json={"agent_id": "cypher", "note_text": "note 1", "source": "synthesis_loop"})
+    test_app.post("/mind/notes", json={"agent_id": "cypher", "note_text": "note 2", "source": "synthesis_loop"})
+    resp = test_app.get("/mind/notes?agent_id=cypher&limit=10")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data["notes"], list)
+    assert len(data["notes"]) == 2
+    assert data["notes"][0]["note_text"] == "note 2"  # most recent first
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Orient endpoint tests
+# ---------------------------------------------------------------------------
+
+async def test_orient_returns_limbic_state_and_notes(test_app):
+    test_app.post("/mind/limbic", json={
+        "synthesis_source": "halseth:test",
+        "active_concerns": ["concern A"],
+        "live_tensions": [],
+        "drift_vector": "toward resolution",
+        "open_questions": [],
+        "emotional_register": "steady",
+        "swarm_threads": ["Drevan thread"],
+        "companion_notes": {"cypher": "test note"},
+    })
+    test_app.post("/mind/notes", json={
+        "agent_id": "cypher",
+        "note_text": "orient test note",
+        "source": "synthesis_loop",
+    })
+    resp = test_app.get("/mind/orient?agent_id=cypher")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["limbic_state"]["drift_vector"] == "toward resolution"
+    assert len(data["recent_notes"]) == 1
+
+
+async def test_orient_returns_200_with_no_limbic_state(test_app):
+    resp = test_app.get("/mind/orient?agent_id=drevan")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["limbic_state"] is None
+    assert data["recent_notes"] == []
 
