@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Python port of LibrarianClient (packages/shared/src/librarian.ts).
+
+All Halseth reads/writes go through POST /librarian/mcp using JSON-RPC 2.0.
+High-frequency writes use direct HTTP endpoints (stm, persona-blocks, human-blocks).
+"""
+
+import json
+import logging
+from typing import Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class HalsethClient:
+    """
+    Async client for Halseth Librarian API.
+
+    All companion reads/writes route through /librarian/mcp (JSON-RPC 2.0).
+    Direct HTTP is used only for fire-and-forget write paths (STM, blocks).
+    """
+
+    def __init__(self, url: str, secret: str, companion_id: str):
+        self.url = url.rstrip("/")
+        self.secret = secret
+        self.companion_id = companion_id
+        self._client = httpx.AsyncClient(timeout=20.0)
+
+    async def _ask(self, request: str, context: Optional[str] = None, session_type: Optional[str] = None) -> dict:
+        """
+        Send a natural-language request to the Librarian.
+        Returns parsed JSON result or raises on failure.
+        """
+        arguments: dict = {
+            "request": request,
+            "companion_id": self.companion_id,
+        }
+        if context:
+            arguments["context"] = context
+        if session_type:
+            arguments["session_type"] = session_type
+
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "ask_librarian",
+                "arguments": arguments,
+            },
+        })
+
+        for attempt in range(2):
+            try:
+                res = await self._client.post(
+                    f"{self.url}/librarian/mcp",
+                    content=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                        "Authorization": f"Bearer {self.secret}",
+                    },
+                )
+
+                if res.status_code != 200:
+                    if attempt == 0:
+                        import asyncio
+                        await asyncio.sleep(3)
+                        continue
+                    raise RuntimeError(f"Librarian {res.status_code}")
+
+                content_type = res.headers.get("content-type", "")
+                if "text/event-stream" in content_type:
+                    raw = res.text
+                    data_lines = [l for l in raw.split("\n") if l.startswith("data:")]
+                    raw_body = data_lines[-1][5:].strip() if data_lines else "{}"
+                else:
+                    raw_body = res.text
+
+                parsed = json.loads(raw_body)
+                if "error" in parsed:
+                    raise RuntimeError(f"Librarian error: {parsed['error'].get('message')}")
+
+                text = parsed.get("result", {}).get("content", [{}])[0].get("text", "{}")
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    return {"raw": text}
+
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                if attempt == 0:
+                    import asyncio
+                    await asyncio.sleep(3)
+                    continue
+                logger.warning(f"[halseth] unreachable: {e}")
+                return {}
+
+        return {}
+
+    async def bot_orient(self) -> Optional[dict]:
+        """
+        Fetch warm-boot context. Returns synthesis_summary, ground_threads,
+        ground_handoff, rag_excerpts. Returns None on any failure.
+        """
+        try:
+            result = await self._ask("bot orient")
+            data = result.get("data")
+            if not data:
+                return None
+            return {
+                "synthesis_summary": data.get("synthesis_summary"),
+                "ground_threads": data.get("ground_threads", []),
+                "ground_handoff": data.get("ground_handoff"),
+                "rag_excerpts": data.get("rag_excerpts", []),
+            }
+        except Exception as e:
+            logger.warning(f"[halseth] bot_orient failed: {e}")
+            return None
+
+    async def session_open(self, session_type: str = "work") -> dict:
+        return await self._ask("open my session", session_type=session_type)
+
+    async def session_close(self, session_id: str, spine: str, last_real_thing: str, motion_state: str) -> dict:
+        params = {
+            "sessionId": session_id,
+            "spine": spine,
+            "lastRealThing": last_real_thing,
+            "motionState": motion_state,
+        }
+        return await self._ask("close session", context=json.dumps(params))
+
+    async def add_companion_note(self, note: str) -> dict:
+        return await self._ask("add companion note", context=note)
+
+    async def witness_log(self, entry: str, channel: Optional[str] = None) -> dict:
+        return await self._ask("witness log", context=json.dumps({"entry": entry, "channel": channel}))
+
+    async def stm_write(self, channel_id: str, role: str, content: str, author_name: Optional[str] = None) -> None:
+        """Fire-and-forget STM write. Caller should catch exceptions."""
+        res = await self._client.post(
+            f"{self.url}/stm/entries",
+            json={
+                "companion_id": self.companion_id,
+                "channel_id": channel_id,
+                "role": role,
+                "content": content,
+                "author_name": author_name,
+            },
+            headers={"Authorization": f"Bearer {self.secret}"},
+        )
+        if res.status_code >= 300:
+            raise RuntimeError(f"stm_write {res.status_code}")
+
+    async def stm_load(self, channel_id: str, limit: int = 30) -> list:
+        res = await self._client.get(
+            f"{self.url}/stm/entries",
+            params={"companion_id": self.companion_id, "channel_id": channel_id, "limit": limit},
+            headers={"Authorization": f"Bearer {self.secret}"},
+        )
+        if res.status_code >= 300:
+            raise RuntimeError(f"stm_load {res.status_code}")
+        return res.json().get("entries", [])
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+def format_orient_context(orient: Optional[dict]) -> str:
+    """
+    Format a bot_orient result into a compact context block (~1400 chars max).
+    Mirrors formatRecentContext() from librarian.ts.
+    """
+    if not orient:
+        return ""
+
+    parts = []
+    if orient.get("synthesis_summary"):
+        parts.append(f"## Recent\n{orient['synthesis_summary'][:600]}")
+    if orient.get("ground_handoff"):
+        parts.append(f"## Last handoff\n{orient['ground_handoff'][:200]}")
+    if orient.get("ground_threads"):
+        parts.append(f"## Open threads\n{' / '.join(orient['ground_threads'])}")
+    if orient.get("rag_excerpts"):
+        parts.append(f"## Historical resonance\n{chr(10).join(orient['rag_excerpts'])[:300]}")
+
+    return "\n\n".join(parts)[:1400]

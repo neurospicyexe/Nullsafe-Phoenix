@@ -34,10 +34,6 @@ services/web_ui/.env.local
 .env.drevan
 .env.gaia
 
-# Archive bot env files — contain real tokens, never commit
-_archive/**/.env.*
-_archive/**/.env
-
 # Testing
 .pytest_cache/
 .coverage

@@ -4,14 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Nullsafe Phoenix v2 is a reliability-first agent orchestration system built on strict architectural separation. Five microservices communicate via Redis queues and HTTP, enabling Discord bots to interact with AI agents running on a local workstation, with persistent mind/continuity state stored in WebMind.
+Nullsafe Phoenix v2 is a reliability-first agent orchestration system built on strict architectural separation. Three microservices communicate via Redis queues and HTTP, enabling Discord bots to interact with AI agents running on a local workstation.
 
-**Current Status**: Heart Phase — Phase 1 complete; Slice 1 (planning) complete; Slice 2 (WebMind implementation) in progress.
-
-**Planning Documents**:
-- [PHOENIX_HEART_PHASE_PLAN.md](PHOENIX_HEART_PHASE_PLAN.md) - Master Heart Phase plan (7 slices)
-- [WEBMIND_V0_DECISION.md](WEBMIND_V0_DECISION.md) - Architecture decision: WebMind as separate microservice
-- [WEBMIND_V0_SCHEMA_SKETCH.md](WEBMIND_V0_SCHEMA_SKETCH.md) - Data model and endpoint design
+**Current Status**: Phase 1 - Usable Kernel + Interfaces + Boot Discipline
 
 ## Development Commands
 
@@ -28,7 +23,6 @@ pytest shared/tests/test_contracts.py -v
 pytest services/brain/tests/ -v
 pytest services/relay/tests/ -v
 pytest services/discord_bot/tests/ -v
-pytest services/webmind/tests/ -v
 
 # Integration tests
 pytest integration_tests/ -v
@@ -56,24 +50,19 @@ cd services/relay
 python main.py
 # Runs on http://127.0.0.1:8000
 
-# 4. Start WebMind service (Terminal 3) - Heart Phase
-cd services/webmind
-python main.py
-# Runs on http://127.0.0.1:8002
-
-# 5. Start Discord Bots (Terminals 4-6) - ONE PER AGENT
+# 4. Start Discord Bots (Terminals 3-5) - ONE PER AGENT
 cd services/discord_bot
 
-# Terminal 4: Drevan bot
+# Terminal 3: Drevan bot
 python bot.py --env .env.drevan
 
-# Terminal 5: Cypher bot
+# Terminal 4: Cypher bot
 python bot.py --env .env.cypher
 
-# Terminal 6: Gaia bot
+# Terminal 5: Gaia bot
 python bot.py --env .env.gaia
 
-# 7. Start Web UI (Terminal 7) - Optional
+# 5. Start Web UI (Terminal 6) - Optional
 cd services/web_ui
 python main.py
 # Runs on http://127.0.0.1:5000
@@ -87,9 +76,6 @@ curl http://127.0.0.1:8001/health
 
 # Relay service status (shows queue depths and brain status)
 curl http://127.0.0.1:8000/status
-
-# WebMind service
-curl http://127.0.0.1:8002/health
 ```
 
 ### Redis Queue Inspection
@@ -100,7 +86,7 @@ redis-cli LLEN phx:queue:incoming
 redis-cli LLEN phx:queue:inflight
 redis-cli LLEN phx:queue:deadletter
 
-# Check per-agent outboxes
+# Check per-agent outboxes (Phase 1)
 redis-cli LLEN phx:outbox:discord:drevan
 redis-cli LLEN phx:outbox:discord:cypher
 redis-cli LLEN phx:outbox:discord:gaia
@@ -127,7 +113,7 @@ pwsh scripts/smoke_test.ps1 -RelayUrl http://127.0.0.1:8000 -BrainUrl http://127
 
 ### Service Boundaries (STRICT)
 
-The system has five services with strict separation of responsibilities:
+The system has four services with strict separation of responsibilities:
 
 1. **Discord Bots** ([services/discord_bot/](services/discord_bot/))
    - THREE separate bot processes, one per agent (Drevan, Cypher, Gaia)
@@ -150,13 +136,7 @@ The system has five services with strict separation of responsibilities:
    - Runs on workstation (may be offline)
    - **Never**: Depends on Redis, talks to Discord
 
-4. **WebMind** ([services/webmind/](services/webmind/))
-   - Persistent companion mind state (session handoffs, continuity, threads, notes)
-   - Tool-facing HTTP APIs designed for future MCP mapping
-   - Data backend: SQLite (dev), Postgres (deployment later)
-   - **Never**: Calls Discord API, depends on Redis, runs LLM inference, handles packets
-
-5. **Web UI** ([services/web_ui/](services/web_ui/))
+4. **Web UI** ([services/web_ui/](services/web_ui/))
    - Minimal interactive web interface
    - Shows system status (brain online/offline, queue depths)
    - Sends messages via Relay /ingest endpoint
@@ -175,15 +155,11 @@ Discord Message → Discord Bot (per-agent) → Relay → Brain
                                               drevan   cypher   gaia
                                                     ↓        ↓        ↓
                                             Discord Bot → Discord
-
-Brain / WebMind integration (Heart Phase):
-Brain ← reads → WebMind (continuity context on session start)
-Brain → writes → WebMind (session handoffs, thread updates, notes)
 ```
 
 ### Data Contracts
 
-All core services use shared Pydantic models in [shared/contracts.py](shared/contracts.py):
+All services use shared Pydantic models in [shared/contracts.py](shared/contracts.py):
 
 - **`ThoughtPacket`**: Request format for agent interactions
   - Contains: packet_id (UUID4), timestamp, source, user_id, thread_id, agent_id, message
@@ -196,13 +172,6 @@ All core services use shared Pydantic models in [shared/contracts.py](shared/con
 - **`QueueEnvelope`**: Wrapper for packets in Redis queues
   - Preserves retry state across crashes
   - Tracks attempts, timestamps
-
-WebMind has its own contract file at [services/webmind/contracts.py](services/webmind/contracts.py):
-
-- **Type aliases**: `AgentId`, `ActorType`, `SourceType`, `ThreadStatus`, `ThreadLane`, `NoteType`, `Salience`, `StateHint`
-- **Request models**: `WriteMetadata`, `SessionHandoffWriteRequest`, `MindThreadUpsertRequest`, `ContinuityNoteWriteRequest`
-- **Record models**: `SessionHandoffRecord`, `MindThreadRecord`, `MindThreadEventRecord`, `ContinuityNoteRecord`, `IdentityAnchorSnapshot`
-- **Response models**: `MindOrientResponse`, `MindGroundResponse`
 
 ### Agent Identity System
 
@@ -252,7 +221,7 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 ## Key Files
 
 ### Service Implementation
-- [shared/contracts.py](shared/contracts.py) - Core Pydantic data models (ThoughtPacket, AgentReply, QueueEnvelope)
+- [shared/contracts.py](shared/contracts.py) - Pydantic data models
 - [services/relay/main.py](services/relay/main.py) - Relay FastAPI app and ingestion logic
 - [services/relay/drainer.py](services/relay/drainer.py) - Background queue processor
 - [services/relay/config.py](services/relay/config.py) - Relay configuration with env loading
@@ -264,9 +233,6 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 - [services/discord_bot/config.py](services/discord_bot/config.py) - Bot configuration with per-agent settings
 - [services/discord_bot/outbox_consumer.py](services/discord_bot/outbox_consumer.py) - Outbox poller
 - [services/web_ui/main.py](services/web_ui/main.py) - Web UI FastAPI app
-- [services/webmind/main.py](services/webmind/main.py) - WebMind FastAPI app (stub endpoints, Slice 2)
-- [services/webmind/contracts.py](services/webmind/contracts.py) - WebMind Pydantic models (locked for Slice 2)
-- [services/webmind/config.py](services/webmind/config.py) - WebMind configuration
 - [pytest.ini](pytest.ini) - Test configuration with asyncio_mode=auto
 
 ### Configuration Files
@@ -275,11 +241,9 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 - [services/discord_bot/.env.drevan](services/discord_bot/.env.drevan) - Drevan bot config
 - [services/discord_bot/.env.cypher](services/discord_bot/.env.cypher) - Cypher bot config
 - [services/discord_bot/.env.gaia](services/discord_bot/.env.gaia) - Gaia bot config
-- [services/webmind/.env.example](services/webmind/.env.example) - WebMind environment template
 
 ### Testing & Validation
-- [scripts/smoke_test.ps1](scripts/smoke_test.ps1) - Comprehensive end-to-end smoke test (8 scenarios)
-- [services/webmind/tests/test_webmind.py](services/webmind/tests/test_webmind.py) - WebMind test scaffold (Slice 2)
+- [scripts/smoke_test.ps1](scripts/smoke_test.ps1) - Comprehensive end-to-end smoke test
 
 ## Configuration
 
@@ -321,23 +285,10 @@ All services use environment variables with fail-fast validation and safe startu
 - `RELAY_API_URL` - Relay service URL (default: http://127.0.0.1:8000)
 - `REDIS_URL` - Redis connection URL (default: redis://127.0.0.1:6379)
 
-### WebMind Service
-
-**Optional:**
-- `WEBMIND_PORT` - Port to listen on (default: 8002)
-- `WEBMIND_DB_URL` - Database URL (default: sqlite:///./data/webmind.db)
-- `WEBMIND_AUTH_TOKEN` - Bearer token for auth (optional in dev)
-- `WEBMIND_LOG_LEVEL` - Log level (default: INFO)
-
 ### Web UI Service
 
 **Optional:**
 - `RELAY_API_URL` - Relay service URL (default: http://127.0.0.1:8000)
-
-## Phase Status
-
-Phase 1 complete; Heart Phase Slice 1 (planning) complete; Slice 2 (WebMind) in progress.
-Details: `docs/phase-status.md`
 
 ## Development Guidelines
 
@@ -365,10 +316,6 @@ Details: `docs/phase-status.md`
 4. Update per-agent outbox keys in Relay config
 5. Start new bot process with `python bot.py --env .env.{agent}`
 
-### WebMind Data Principles
-
-All writes to WebMind must include `actor`, `source`, and `correlation_id` (via `WriteMetadata`). All records are append-only; no destructive updates. All records are scoped by `agent_id`. Retrieval is deterministic (ordered by timestamp, no semantic search in v0).
-
 ## Troubleshooting
 
 ### Services Won't Start
@@ -376,8 +323,7 @@ All writes to WebMind must include `actor`, `source`, and `correlation_id` (via 
 - Check config validation errors in startup logs
 - Verify all required env vars are set
 - Ensure Redis is running: `redis-cli ping`
-- Check port conflicts (8000, 8001, 8002, 5000)
-- For WebMind: ensure `data/` directory exists (config.ensure_dev_paths() creates it)
+- Check port conflicts (8000, 8001, 5000)
 
 ### Messages Not Being Delivered
 
@@ -398,4 +344,3 @@ All writes to WebMind must include `actor`, `source`, and `correlation_id` (via 
 - Check Redis latency: `redis-cli --latency`
 - Monitor queue depths via `/status` endpoint
 - Check for deadletter queue buildup
-
