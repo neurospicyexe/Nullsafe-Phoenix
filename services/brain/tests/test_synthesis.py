@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import json
+import sys
+from pathlib import Path
+
+# Add project root to path so we can import shared module
+project_root = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 import pytest
 
 
@@ -76,3 +83,20 @@ def test_parser_extracts_from_code_block():
     state = parse_limbic_state(raw)
     assert state is not None
     assert state.drift_vector == "sideways"
+
+
+@pytest.mark.asyncio
+async def test_halseth_client_has_synthesis_read():
+    from services.brain.halseth_client import HalsethClient
+    client = HalsethClient(url="http://localhost:8001", secret="test", companion_id="cypher")
+    assert hasattr(client, "synthesis_read")
+
+
+@pytest.mark.asyncio
+async def test_webmind_client_has_write_limbic_state():
+    from services.brain.webmind_client import WebMindClient
+    client = WebMindClient(url="http://localhost:8002")
+    assert hasattr(client, "write_limbic_state")
+    assert hasattr(client, "get_current_limbic_state")
+    assert hasattr(client, "write_note")
+    assert hasattr(client, "get_notes")
