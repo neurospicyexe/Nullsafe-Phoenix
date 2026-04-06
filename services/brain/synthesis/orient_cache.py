@@ -61,17 +61,19 @@ class OrientCache:
     def __init__(self, webmind_client: Optional[WebMindClient] = None, ttl_seconds: int = 300):
         self._webmind = webmind_client
         self._ttl = ttl_seconds
-        # {thread_id: (expires_at_timestamp, formatted_block)}
-        self._cache: Dict[str, Tuple[float, str]] = {}
+        # {(thread_id, agent_id): (expires_at_timestamp, formatted_block)}
+        self._cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
 
     async def get(self, thread_id: str, agent_id: str) -> Optional[str]:
         """
         Return cached orient block or fetch from WebMind on miss.
 
         Returns None if WebMind is unavailable or has no limbic state.
+        Cache key is (thread_id, agent_id) to prevent cross-agent pollution.
         """
         now = time.monotonic()
-        cached = self._cache.get(thread_id)
+        key = (thread_id, agent_id)
+        cached = self._cache.get(key)
         if cached and now < cached[0]:
             return cached[1]
 
@@ -83,5 +85,5 @@ class OrientCache:
             return None
 
         block = _format_limbic_block(orient, agent_id)
-        self._cache[thread_id] = (now + self._ttl, block)
+        self._cache[key] = (now + self._ttl, block)
         return block
