@@ -10,6 +10,7 @@ NEVER depends on Redis, NEVER talks to Discord.
 import logging
 import os
 import uuid as _uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Dict
 
@@ -23,6 +24,10 @@ from services.brain.config import Config
 from services.brain.identity.loader import IdentityLoader
 from services.brain.agents.router import AgentRouter
 from services.brain.inference_client import InferenceClient
+from services.brain.halseth_client import HalsethClient
+from services.brain.webmind_client import WebMindClient
+from services.brain.synthesis.loop import SynthesisLoop
+from services.brain.synthesis.orient_cache import OrientCache
 
 # Load environment variables
 load_dotenv(".env.brain")
@@ -36,21 +41,6 @@ logger = logging.getLogger(__name__)
 
 # Suppress verbose uvicorn access logs
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="Nullsafe Phoenix Brain",
-    version="v2-day-one",
-    description="Workstation Brain service for agent intelligence"
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[os.getenv("BRAIN_ALLOWED_ORIGIN", "http://127.0.0.1:8000")],
-    allow_methods=["POST"],
-    allow_headers=["Content-Type"],
-)
 
 # Validate configuration on startup
 try:
@@ -78,7 +68,81 @@ if Config.LOCAL_INFERENCE_URL or Config.DEEPSEEK_API_KEY:
 else:
     logger.info("No inference backend configured -- stub replies active")
 
+# Initial router (no orient cache); lifespan will replace with wired version
 agent_router = AgentRouter(identity_loader, inference_client=_inference_client)
+
+_synthesis_loop = None
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global _synthesis_loop, agent_router
+
+    # Setup webmind client
+    webmind_client = None
+    if Config.WEBMIND_URL:
+        webmind_client = WebMindClient(url=Config.WEBMIND_URL)
+
+    # Setup orient cache
+    orient_cache = OrientCache(webmind_client=webmind_client) if webmind_client else None
+
+    # Re-initialize agent_router with orient_cache
+    agent_router = AgentRouter(
+        identity_loader,
+        inference_client=_inference_client,
+        orient_cache=orient_cache,
+    )
+
+    # Start synthesis loop if fully configured
+    if Config.SYNTHESIS_ENABLED and _inference_client and Config.HALSETH_URL and webmind_client:
+        halseth_client = HalsethClient(
+            url=Config.HALSETH_URL,
+            secret=Config.HALSETH_ADMIN_SECRET or "",
+            companion_id="cypher",
+        )
+        _synthesis_loop = SynthesisLoop(
+            halseth_client=halseth_client,
+            inference_client=_inference_client,
+            webmind_client=webmind_client,
+            interval_seconds=Config.SYNTHESIS_INTERVAL,
+        )
+        _synthesis_loop.start()
+        logger.info(f"[synthesis] Loop started (interval={Config.SYNTHESIS_INTERVAL}s)")
+    else:
+        reasons = []
+        if not Config.SYNTHESIS_ENABLED:
+            reasons.append("SYNTHESIS_ENABLED=false")
+        if not _inference_client:
+            reasons.append("no inference backend")
+        if not Config.HALSETH_URL:
+            reasons.append("HALSETH_URL not set")
+        if not webmind_client:
+            reasons.append("WEBMIND_URL not set")
+        logger.info(f"[synthesis] Loop not started: {', '.join(reasons)}")
+
+    yield
+
+    # Shutdown
+    if _synthesis_loop:
+        _synthesis_loop.stop()
+        logger.info("[synthesis] Loop stopped on shutdown")
+
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(
+    title="Nullsafe Phoenix Brain",
+    version="v2-day-one",
+    description="Workstation Brain service for agent intelligence",
+    lifespan=lifespan,
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.getenv("BRAIN_ALLOWED_ORIGIN", "http://127.0.0.1:8000")],
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 @app.get("/health")

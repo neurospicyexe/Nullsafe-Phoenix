@@ -39,16 +39,18 @@ class AgentRouter:
         "gaia": re.compile(r"^gaia:\s*", re.IGNORECASE),
     }
 
-    def __init__(self, identity_loader: IdentityLoader, inference_client: Optional[InferenceClient] = None):
+    def __init__(self, identity_loader: IdentityLoader, inference_client: Optional[InferenceClient] = None, orient_cache=None):
         """
         Initialize agent router.
 
         Args:
             identity_loader: Identity loader for loading agent identities
             inference_client: Inference client for LLM completions (optional; falls back to stub)
+            orient_cache: OrientCache instance for limbic context injection (optional)
         """
         self.identity_loader = identity_loader
         self.inference_client = inference_client
+        self._orient_cache = orient_cache
         self._thread_routing: Dict[str, str] = {}  # thread_id -> active_agent_id
 
     def detect_override(self, message: str) -> tuple[str | None, str]:
@@ -143,6 +145,11 @@ class AgentRouter:
         # Generate reply via inference or stub
         if self.inference_client:
             system_prompt = self.identity_loader.construct_prompt_context(identity)
+            # Inject limbic context if orient cache is available
+            if self._orient_cache:
+                limbic_block = await self._orient_cache.get(packet.thread_id, active_agent_id)
+                if limbic_block:
+                    system_prompt = system_prompt + "\n\n" + limbic_block
             reply_text, backend = await self.inference_client.complete(
                 system_prompt, cleaned_message, active_agent_id
             )
