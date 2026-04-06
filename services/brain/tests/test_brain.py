@@ -208,3 +208,24 @@ class TestChatEndpoint:
         assert len(repro_stamp["identity_version"]) == 16  # SHA256 first 16 chars
         assert "timestamp" in repro_stamp
         assert "thread_routing" in repro_stamp
+
+
+class TestBrainConfig:
+    """Test suite for Brain service configuration."""
+
+    def test_brain_config_has_halseth_url(self):
+        """Test that Config has Halseth and WebMind integration attributes."""
+        from services.brain.config import Config
+        assert hasattr(Config, "HALSETH_URL")
+        assert hasattr(Config, "HALSETH_ADMIN_SECRET")
+        assert hasattr(Config, "WEBMIND_URL")
+        assert hasattr(Config, "SYNTHESIS_INTERVAL")
+
+    def test_synthesis_interval_default_is_1200(self):
+        """Test that SYNTHESIS_INTERVAL defaults to 1200 seconds."""
+        import os
+        os.environ.pop("SYNTHESIS_INTERVAL", None)
+        import importlib
+        import services.brain.config as cfg_module
+        importlib.reload(cfg_module)
+        assert cfg_module.Config.SYNTHESIS_INTERVAL == 1200
