@@ -210,6 +210,49 @@ class TestChatEndpoint:
         assert "thread_routing" in repro_stamp
 
 
+@pytest.mark.asyncio
+async def test_router_injects_limbic_into_system_prompt():
+    from unittest.mock import MagicMock, AsyncMock
+    from services.brain.agents.router import AgentRouter
+    from services.brain.synthesis.orient_cache import OrientCache
+    from shared.contracts import ThoughtPacket
+    import uuid
+
+    mock_identity_loader = MagicMock()
+    mock_identity = MagicMock()
+    mock_identity.name = "Cypher"
+    mock_identity.anchors = ["clarity"]
+    # load_identity returns (identity, version_string)
+    mock_identity_loader.load_identity.return_value = (mock_identity, "abc123")
+    mock_identity_loader.construct_prompt_context.return_value = "You are Cypher."
+
+    mock_inference = AsyncMock()
+    mock_inference.complete.return_value = ("test reply", "local")
+
+    mock_cache = AsyncMock()
+    mock_cache.get.return_value = "\n[SWARM STATE]\nDrift direction: forward"
+
+    router = AgentRouter(
+        identity_loader=mock_identity_loader,
+        inference_client=mock_inference,
+        orient_cache=mock_cache,
+    )
+
+    packet = ThoughtPacket(
+        packet_id=str(uuid.uuid4()),
+        timestamp="2026-04-05T12:00:00+00:00",
+        source="discord",
+        user_id="test-user",
+        thread_id="test-thread",
+        agent_id="cypher",
+        message="hello",
+        metadata={"channel_id": "test-channel"},
+    )
+    reply = await router.route_and_process(packet)
+    assert reply.status == "ok"
+    mock_cache.get.assert_called_once()
+
+
 class TestBrainConfig:
     """Test suite for Brain service configuration."""
 

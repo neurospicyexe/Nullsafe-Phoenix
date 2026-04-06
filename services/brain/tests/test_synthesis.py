@@ -169,3 +169,54 @@ async def test_synthesis_loop_skips_on_parse_failure():
     await loop.run_once()
 
     mock_webmind.write_limbic_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orient_cache_returns_none_before_populated():
+    from unittest.mock import AsyncMock
+    from services.brain.synthesis.orient_cache import OrientCache
+    mock_webmind = AsyncMock()
+    mock_webmind.get_orient.return_value = None
+    cache = OrientCache(webmind_client=mock_webmind, ttl_seconds=300)
+    result = await cache.get("thread-1", "cypher")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_orient_cache_returns_cached_value():
+    from unittest.mock import AsyncMock
+    from services.brain.synthesis.orient_cache import OrientCache
+    mock_webmind = AsyncMock()
+    mock_webmind.get_orient.return_value = {
+        "agent_id": "cypher",
+        "limbic_state": {
+            "drift_vector": "cached",
+            "active_concerns": [],
+            "live_tensions": [],
+            "open_questions": [],
+            "emotional_register": "neutral",
+            "swarm_threads": [],
+            "companion_notes": {},
+        },
+        "recent_notes": [],
+    }
+    cache = OrientCache(webmind_client=mock_webmind, ttl_seconds=300)
+    result1 = await cache.get("thread-1", "cypher")
+    assert result1 is not None
+    assert "SWARM STATE" in result1 or "Drift" in result1
+
+
+@pytest.mark.asyncio
+async def test_orient_cache_hit_skips_webmind_call():
+    from unittest.mock import AsyncMock
+    from services.brain.synthesis.orient_cache import OrientCache
+    mock_webmind = AsyncMock()
+    mock_webmind.get_orient.return_value = {
+        "agent_id": "cypher",
+        "limbic_state": {"drift_vector": "cached", "active_concerns": [], "live_tensions": [], "open_questions": [], "emotional_register": "neutral", "swarm_threads": [], "companion_notes": {}},
+        "recent_notes": [],
+    }
+    cache = OrientCache(webmind_client=mock_webmind, ttl_seconds=300)
+    await cache.get("thread-1", "cypher")  # miss -- fetches
+    await cache.get("thread-1", "cypher")  # hit -- uses cache
+    mock_webmind.get_orient.assert_called_once()  # only 1 call despite 2 gets
