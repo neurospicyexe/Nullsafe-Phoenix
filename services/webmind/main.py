@@ -128,7 +128,7 @@ async def get_current_limbic_state():
     async with aiosqlite.connect(get_db_path()) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT * FROM limbic_states ORDER BY created_at DESC LIMIT 1"
+            "SELECT * FROM limbic_states ORDER BY created_at DESC, rowid DESC LIMIT 1"
         )
         row = await cursor.fetchone()
 
@@ -187,6 +187,8 @@ async def list_notes(
     limit: int = Query(10, ge=1, le=100),
 ):
     """Return recent notes for an agent, most recent first."""
+    if agent_id not in ("drevan", "cypher", "gaia", "swarm"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
     async with aiosqlite.connect(get_db_path()) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -233,7 +235,7 @@ async def mind_orient(
         db.row_factory = aiosqlite.Row
 
         cursor = await db.execute(
-            "SELECT * FROM limbic_states ORDER BY created_at DESC LIMIT 1"
+            "SELECT * FROM limbic_states ORDER BY created_at DESC, rowid DESC LIMIT 1"
         )
         row = await cursor.fetchone()
         if row:
@@ -252,7 +254,7 @@ async def mind_orient(
             )
 
         cursor = await db.execute(
-            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC LIMIT 10",
+            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC LIMIT 5",
             (agent_id,),
         )
         note_rows = await cursor.fetchall()
