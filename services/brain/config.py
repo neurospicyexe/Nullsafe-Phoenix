@@ -27,6 +27,17 @@ class Config:
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     DEEPSEEK_API_KEY: Optional[str] = os.getenv("DEEPSEEK_API_KEY")
 
+    # Halseth integration
+    HALSETH_URL: Optional[str] = os.getenv("HALSETH_URL")
+    HALSETH_ADMIN_SECRET: Optional[str] = os.getenv("HALSETH_ADMIN_SECRET")
+
+    # Phoenix WebMind integration
+    WEBMIND_URL: Optional[str] = os.getenv("WEBMIND_URL", "http://127.0.0.1:8002")
+
+    # Synthesis loop
+    SYNTHESIS_INTERVAL: int = int(os.getenv("SYNTHESIS_INTERVAL", "1200"))
+    SYNTHESIS_ENABLED: bool = os.getenv("SYNTHESIS_ENABLED", "false").lower() == "true"
+
     @staticmethod
     def validate():
         """Validate required config on startup."""
@@ -68,4 +79,8 @@ class Config:
         print(
             f"  DeepSeek key: {'✓ Set' if Config.DEEPSEEK_API_KEY else '✗ Not set'}"
         )
+        print(f"  Halseth URL: {Config.HALSETH_URL or 'not configured'}")
+        print(f"  WebMind URL: {Config.WEBMIND_URL}")
+        print(f"  Synthesis enabled: {Config.SYNTHESIS_ENABLED}")
+        print(f"  Synthesis interval: {Config.SYNTHESIS_INTERVAL}s")
         print("=" * 60)
