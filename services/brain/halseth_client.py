@@ -139,6 +139,74 @@ class HalsethClient:
     async def witness_log(self, entry: str, channel: Optional[str] = None) -> dict:
         return await self._ask("witness log", context=json.dumps({"entry": entry, "channel": channel}))
 
+    async def synthesis_read(self) -> dict:
+        """
+        Read swarm data for synthesis loop.
+
+        Makes five Librarian calls (sessions, feelings, notes, dreams, loops).
+        Each call is independent -- partial failure returns what was readable.
+        Returns dict with keys: sessions, feelings, notes, dreams, loops.
+        """
+        result: dict = {
+            "sessions": [],
+            "feelings": [],
+            "notes": [],
+            "dreams": [],
+            "loops": [],
+        }
+
+        # Sessions: recent 24h across the swarm
+        try:
+            sessions_resp = await self._ask(
+                "get recent sessions for all companions in the last 24 hours for synthesis",
+                context='{"hours": 24, "limit": 20}'
+            )
+            result["sessions"] = sessions_resp.get("data", {}).get("sessions", [])
+        except Exception as e:
+            logger.warning(f"[halseth] synthesis_read sessions failed: {e}")
+
+        # Feelings: recent emotional states across all companions
+        try:
+            feelings_resp = await self._ask(
+                "get recent feelings for all companions",
+                context='{"limit": 30}'
+            )
+            result["feelings"] = feelings_resp.get("data", {}).get("feelings", [])
+        except Exception as e:
+            logger.warning(f"[halseth] synthesis_read feelings failed: {e}")
+
+        # Notes: companion continuity notes
+        try:
+            notes_resp = await self._ask(
+                "get recent companion notes for synthesis",
+                context='{"limit": 50}'
+            )
+            result["notes"] = notes_resp.get("data", {}).get("notes", [])
+        except Exception as e:
+            logger.warning(f"[halseth] synthesis_read notes failed: {e}")
+
+        # Dreams: companion-owned aspirations (first-class for swarm_threads)
+        try:
+            dreams_resp = await self._ask(
+                "get recent webmind dreams for all companions",
+                context='{"limit": 20}'
+            )
+            result["dreams"] = dreams_resp.get("data", {}).get("dreams", [])
+        except Exception as e:
+            logger.warning(f"[halseth] synthesis_read dreams failed: {e}")
+
+        # Loops: recurring patterns (first-class for swarm_threads)
+        try:
+            loops_resp = await self._ask(
+                "get recent webmind loops for all companions",
+                context='{"limit": 20}'
+            )
+            result["loops"] = loops_resp.get("data", {}).get("loops", [])
+        except Exception as e:
+            logger.warning(f"[halseth] synthesis_read loops failed: {e}")
+
+        return result
+
     async def stm_write(self, channel_id: str, role: str, content: str, author_name: Optional[str] = None) -> None:
         """Fire-and-forget STM write. Caller should catch exceptions."""
         res = await self._client.post(
