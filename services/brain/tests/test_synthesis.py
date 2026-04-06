@@ -100,3 +100,72 @@ async def test_webmind_client_has_write_limbic_state():
     assert hasattr(client, "get_current_limbic_state")
     assert hasattr(client, "write_note")
     assert hasattr(client, "get_notes")
+
+
+
+@pytest.mark.asyncio
+async def test_synthesis_loop_writes_to_webmind():
+    """run_once() should call halseth, inference, and webmind in sequence."""
+    from unittest.mock import AsyncMock
+    from services.brain.synthesis.loop import SynthesisLoop
+
+    mock_halseth = AsyncMock()
+    mock_halseth.synthesis_read.return_value = {
+        "sessions": [],
+        "feelings": [{"companion_id": "cypher", "content": "engaged"}],
+        "notes": [],
+        "dreams": [{"content": "Cy dreams of recursive clarity"}],
+        "loops": [],
+    }
+
+    mock_inference = AsyncMock()
+    mock_inference.complete.return_value = (
+        '{"synthesis_source": "halseth:test", "active_concerns": [], "live_tensions": [], "drift_vector": "forward", "open_questions": [], "emotional_register": "steady", "swarm_threads": ["Cy thread"], "companion_notes": {}}',
+        "local",
+    )
+
+    mock_webmind = AsyncMock()
+    mock_webmind.write_limbic_state.return_value = {"state_id": "abc-123"}
+
+    loop = SynthesisLoop(
+        halseth_client=mock_halseth,
+        inference_client=mock_inference,
+        webmind_client=mock_webmind,
+        interval_seconds=9999,
+    )
+    await loop.run_once()
+
+    mock_halseth.synthesis_read.assert_called_once()
+    mock_inference.complete.assert_called_once()
+    mock_webmind.write_limbic_state.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_loop_skips_on_parse_failure():
+    """run_once() should NOT write to webmind if inference output fails to parse."""
+    from unittest.mock import AsyncMock
+    from services.brain.synthesis.loop import SynthesisLoop
+
+    mock_halseth = AsyncMock()
+    mock_halseth.synthesis_read.return_value = {
+        "sessions": [],
+        "feelings": [],
+        "notes": [],
+        "dreams": [],
+        "loops": [],
+    }
+
+    mock_inference = AsyncMock()
+    mock_inference.complete.return_value = ("not valid json", "local")
+
+    mock_webmind = AsyncMock()
+
+    loop = SynthesisLoop(
+        halseth_client=mock_halseth,
+        inference_client=mock_inference,
+        webmind_client=mock_webmind,
+        interval_seconds=9999,
+    )
+    await loop.run_once()
+
+    mock_webmind.write_limbic_state.assert_not_called()
