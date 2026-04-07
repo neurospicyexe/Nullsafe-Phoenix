@@ -150,6 +150,7 @@ class HalsethClient:
         result: dict = {
             "sessions": [],
             "feelings": [],
+            "tensions": [],
             "notes": [],
             "dreams": [],
             "loops": [],
@@ -204,6 +205,20 @@ class HalsethClient:
             result["loops"] = loops_resp.get("data", {}).get("loops", [])
         except Exception as e:
             logger.warning(f"[halseth] synthesis_read loops failed: {e}")
+
+        # Tensions: direct HTTP (GET /ingest/tensions) -- Librarian NL doesn't route here reliably
+        try:
+            tensions_res = await self._client.get(
+                f"{self.url}/ingest/tensions",
+                headers={"Authorization": f"Bearer {self.secret}"},
+            )
+            if tensions_res.status_code == 200:
+                body = tensions_res.json()
+                result["tensions"] = body if isinstance(body, list) else body.get("tensions", [])
+            else:
+                logger.warning(f"[halseth] synthesis_read tensions {tensions_res.status_code}")
+        except Exception as e:
+            logger.warning(f"[halseth] synthesis_read tensions failed: {e}")
 
         return result
 
