@@ -105,8 +105,8 @@ async def test_webmind_client_has_write_limbic_state():
 
 @pytest.mark.asyncio
 async def test_synthesis_loop_writes_to_webmind():
-    """run_once() should call halseth, inference, and webmind in sequence."""
-    from unittest.mock import AsyncMock
+    """run_once() should call halseth, inference, and halseth_writer in sequence."""
+    from unittest.mock import AsyncMock, patch
     from services.brain.synthesis.loop import SynthesisLoop
 
     mock_halseth = AsyncMock()
@@ -124,26 +124,26 @@ async def test_synthesis_loop_writes_to_webmind():
         "local",
     )
 
-    mock_webmind = AsyncMock()
-    mock_webmind.write_limbic_state.return_value = {"state_id": "abc-123"}
-
     loop = SynthesisLoop(
         halseth_client=mock_halseth,
         inference_client=mock_inference,
-        webmind_client=mock_webmind,
         interval_seconds=9999,
+        dry_run=False,
     )
-    await loop.run_once()
+    
+    with patch("services.brain.synthesis.loop.halseth_writer") as mock_writer:
+        mock_writer.write_all = AsyncMock(return_value="write summary")
+        await loop.run_once()
 
-    mock_halseth.synthesis_read.assert_called_once()
-    mock_inference.complete.assert_called_once()
-    mock_webmind.write_limbic_state.assert_called_once()
+        mock_halseth.synthesis_read.assert_called_once()
+        mock_inference.complete.assert_called_once()
+        mock_writer.write_all.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_synthesis_loop_skips_on_parse_failure():
-    """run_once() should NOT write to webmind if inference output fails to parse."""
-    from unittest.mock import AsyncMock
+    """run_once() should NOT write to halseth if inference output fails to parse."""
+    from unittest.mock import AsyncMock, patch
     from services.brain.synthesis.loop import SynthesisLoop
 
     mock_halseth = AsyncMock()
@@ -158,17 +158,18 @@ async def test_synthesis_loop_skips_on_parse_failure():
     mock_inference = AsyncMock()
     mock_inference.complete.return_value = ("not valid json", "local")
 
-    mock_webmind = AsyncMock()
-
     loop = SynthesisLoop(
         halseth_client=mock_halseth,
         inference_client=mock_inference,
-        webmind_client=mock_webmind,
         interval_seconds=9999,
+        dry_run=False,
     )
-    await loop.run_once()
+    
+    with patch("services.brain.synthesis.loop.halseth_writer") as mock_writer:
+        mock_writer.write_all = AsyncMock()
+        await loop.run_once()
 
-    mock_webmind.write_limbic_state.assert_not_called()
+        mock_writer.write_all.assert_not_called()
 
 
 @pytest.mark.asyncio
