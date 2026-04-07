@@ -92,9 +92,12 @@ class SynthesisLoop:
 
         try:
             summary = await halseth_writer.write_all(self._halseth, limbic_state)
-            logger.info(f"[synthesis] Write summary: {summary}")
+            if not summary.get("limbic"):
+                logger.error("[synthesis] Limbic write FAILED -- state not persisted")
+            else:
+                logger.info(f"[synthesis] Write summary: {summary}")
         except Exception as e:
-            logger.warning(f"[synthesis] Halseth write failed: {e}")
+            logger.error(f"[synthesis] Halseth write failed: {e}")
 
     def start(self) -> None:
         """Start the synthesis loop as a background asyncio task."""
