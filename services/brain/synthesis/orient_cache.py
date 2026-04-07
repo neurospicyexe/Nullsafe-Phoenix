@@ -23,7 +23,7 @@ def _format_limbic_block(orient: dict, agent_id: str) -> str:
     limbic = orient.get("limbic_state") or {}
     notes = orient.get("recent_notes", [])
 
-    lines = ["[SWARM STATE]"]
+    lines = []
     if limbic.get("emotional_register"):
         lines.append(f"Emotional register: {limbic['emotional_register']}")
     if limbic.get("active_concerns"):
@@ -46,7 +46,10 @@ def _format_limbic_block(orient: dict, agent_id: str) -> str:
     if companion_note:
         lines.append(f"\n[COMPANION NOTE FOR YOU]\n{companion_note}")
 
-    return "\n".join(lines)
+    if not lines:
+        return ""
+
+    return "[SWARM STATE]\n" + "\n".join(lines)
 
 
 class OrientCache:
