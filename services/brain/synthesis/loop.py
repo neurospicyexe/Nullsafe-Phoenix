@@ -3,8 +3,9 @@
 """
 Brain synthesis loop.
 
-Runs as a background asyncio task started in Brain's FastAPI lifespan.
-Stops cleanly when the task is cancelled.
+Runs as a background asyncio task or standalone script.
+Reads swarm data from Halseth, synthesizes via inference,
+writes structured state back to Halseth.
 """
 
 import asyncio
@@ -13,9 +14,9 @@ from typing import Optional
 
 from services.brain.halseth_client import HalsethClient
 from services.brain.inference_client import InferenceClient
-from services.brain.webmind_client import WebMindClient
 from services.brain.synthesis.prompt import build_synthesis_prompt
 from services.brain.synthesis.parser import parse_limbic_state
+from services.brain.synthesis import halseth_writer
 
 logger = logging.getLogger(__name__)
 
@@ -26,20 +27,20 @@ class SynthesisLoop:
 
     Call start() to begin the loop as an asyncio background task.
     Call stop() to cancel gracefully.
-    Call run_once() to execute a single synthesis pass (used in tests).
+    Call run_once() to execute a single synthesis pass (used in tests and standalone mode).
     """
 
     def __init__(
         self,
         halseth_client: HalsethClient,
         inference_client: InferenceClient,
-        webmind_client: WebMindClient,
         interval_seconds: int = 1200,
+        dry_run: bool = False,
     ):
         self._halseth = halseth_client
         self._inference = inference_client
-        self._webmind = webmind_client
         self._interval = interval_seconds
+        self._dry_run = dry_run
         self._task: Optional[asyncio.Task] = None
 
     async def run_once(self) -> None:
@@ -50,7 +51,7 @@ class SynthesisLoop:
         2. Build synthesis prompt
         3. Call inference
         4. Parse output into LimbicState
-        5. Write to WebMind (only if parse succeeded)
+        5. Write to Halseth (limbic blob + threads + notes)
 
         Never raises. Logs and returns on any failure.
         """
@@ -81,18 +82,19 @@ class SynthesisLoop:
         # 4. Parse output
         limbic_state = parse_limbic_state(raw_output)
         if limbic_state is None:
-            logger.warning("[synthesis] Parse failed -- skipping WebMind write (last state unchanged)")
+            logger.warning("[synthesis] Parse failed -- skipping writes")
             return
 
-        # 5. Write to WebMind
+        # 5. Write to Halseth
+        if self._dry_run:
+            logger.info(f"[synthesis] DRY RUN -- would write: {limbic_state.model_dump_json(indent=2)}")
+            return
+
         try:
-            result = await self._webmind.write_limbic_state(limbic_state.model_dump())
-            if result:
-                logger.info(f"[synthesis] LimbicState written: {result.get('state_id', '?')}")
-            else:
-                logger.warning("[synthesis] WebMind write returned None -- WebMind may be offline")
+            summary = await halseth_writer.write_all(self._halseth, limbic_state)
+            logger.info(f"[synthesis] Write summary: {summary}")
         except Exception as e:
-            logger.warning(f"[synthesis] WebMind write failed: {e}")
+            logger.warning(f"[synthesis] Halseth write failed: {e}")
 
     def start(self) -> None:
         """Start the synthesis loop as a background asyncio task."""
