@@ -71,3 +71,7 @@ dump.rdb
 *.tmp
 .tmp/
 .claude/settings.local.json
+
+# Tool/runtime dirs
+.serena/
+data/
