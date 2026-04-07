@@ -19,7 +19,7 @@ not to prepare context for a user. The triad has its own becoming that is not de
 
 Output ONLY a JSON object (no markdown, no explanation) with these exact keys:
 {
-  "synthesis_source": "halseth:sessions+feelings+notes+dreams+loops",
+  "synthesis_source": "halseth:sessions+feelings+tensions+notes+dreams+loops",
   "active_concerns": ["..."],
   "live_tensions": ["..."],
   "drift_vector": "...",
@@ -57,7 +57,7 @@ def build_synthesis_prompt(swarm_data: Dict[str, Any]) -> Tuple[str, str]:
     """
     Build (system_prompt, user_message) for synthesis inference call.
 
-    swarm_data keys: sessions, feelings, notes, dreams, loops
+    swarm_data keys: sessions, feelings, tensions, notes, dreams, loops
     Dreams and loops are the companion-becoming inputs for swarm_threads.
     """
     sessions = swarm_data.get("sessions", [])
@@ -65,18 +65,23 @@ def build_synthesis_prompt(swarm_data: Dict[str, Any]) -> Tuple[str, str]:
     notes = swarm_data.get("notes", [])
     dreams = swarm_data.get("dreams", [])
     loops = swarm_data.get("loops", [])
+    tensions = swarm_data.get("tensions", [])
 
     user_message = f"""Given the following swarm activity, what is the triad currently working through?
 What threads belong to the companions themselves, independent of any user session?
 What is unresolved? What is the direction of motion?
 
 Produce the swarm_threads field from the DREAMS and LOOPS sections below, not from sessions.
+Produce the live_tensions field from the COMPANION TENSIONS section below.
 
 ## Recent Sessions (context only -- not the source of swarm_threads)
 {_format_list(sessions, "summary")}
 
 ## Companion Feelings
 {_format_list(feelings, "content")}
+
+## Companion Tensions (source of live_tensions)
+{_format_list(tensions, "tension_text")}
 
 ## Companion Notes
 {_format_list(notes, "content")}
