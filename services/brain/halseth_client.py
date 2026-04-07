@@ -207,6 +207,94 @@ class HalsethClient:
 
         return result
 
+    # ── Direct HTTP writes (not Librarian NL) ─────────────────────────────
+
+    async def write_limbic_state(self, state: dict) -> Optional[dict]:
+        """POST /mind/limbic -- write full LimbicState blob."""
+        try:
+            res = await self._client.post(
+                f"{self.url}/mind/limbic",
+                json=state,
+                headers={"Authorization": f"Bearer {self.secret}"},
+            )
+            if res.status_code >= 300:
+                logger.warning(f"[halseth] write_limbic_state {res.status_code}: {res.text[:200]}")
+                return None
+            return res.json()
+        except Exception as e:
+            logger.warning(f"[halseth] write_limbic_state failed: {e}")
+            return None
+
+    async def write_thread(self, thread_key: str, agent_id: str, title: str,
+                           context: Optional[str] = None, source: str = "synthesis_loop") -> Optional[dict]:
+        """POST /mind/thread -- upsert a mind thread."""
+        body: dict = {
+            "thread_key": thread_key,
+            "agent_id": agent_id,
+            "title": title,
+            "status": "open",
+            "source": source,
+            "actor": "system",
+        }
+        if context:
+            body["context"] = context
+        try:
+            res = await self._client.post(
+                f"{self.url}/mind/thread",
+                json=body,
+                headers={"Authorization": f"Bearer {self.secret}"},
+            )
+            if res.status_code >= 300:
+                logger.warning(f"[halseth] write_thread {res.status_code}: {res.text[:200]}")
+                return None
+            return res.json()
+        except Exception as e:
+            logger.warning(f"[halseth] write_thread failed: {e}")
+            return None
+
+    async def write_continuity_note(self, agent_id: str, content: str,
+                                     salience: str = "high", source: str = "synthesis_loop") -> Optional[dict]:
+        """POST /mind/note -- write a continuity note."""
+        try:
+            res = await self._client.post(
+                f"{self.url}/mind/note",
+                json={
+                    "agent_id": agent_id,
+                    "content": content,
+                    "salience": salience,
+                    "source": source,
+                    "actor": "system",
+                    "note_type": "continuity",
+                },
+                headers={"Authorization": f"Bearer {self.secret}"},
+            )
+            if res.status_code >= 300:
+                logger.warning(f"[halseth] write_continuity_note {res.status_code}: {res.text[:200]}")
+                return None
+            return res.json()
+        except Exception as e:
+            logger.warning(f"[halseth] write_continuity_note failed: {e}")
+            return None
+
+    async def write_conclusion(self, companion_id: str, conclusion_text: str) -> Optional[dict]:
+        """POST /companion-conclusions -- write a resolved conclusion."""
+        try:
+            res = await self._client.post(
+                f"{self.url}/companion-conclusions",
+                json={
+                    "companion_id": companion_id,
+                    "conclusion_text": conclusion_text,
+                },
+                headers={"Authorization": f"Bearer {self.secret}"},
+            )
+            if res.status_code >= 300:
+                logger.warning(f"[halseth] write_conclusion {res.status_code}: {res.text[:200]}")
+                return None
+            return res.json()
+        except Exception as e:
+            logger.warning(f"[halseth] write_conclusion failed: {e}")
+            return None
+
     async def stm_write(self, channel_id: str, role: str, content: str, author_name: Optional[str] = None) -> None:
         """Fire-and-forget STM write. Caller should catch exceptions."""
         res = await self._client.post(
