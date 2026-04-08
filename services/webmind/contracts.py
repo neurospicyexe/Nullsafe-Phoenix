@@ -218,6 +218,6 @@ class MindGroundResponse(BaseModel):
     agent_id: AgentId
     open_threads: List[MindThreadRecord] = Field(default_factory=list)
     recent_handoffs: List[SessionHandoffRecord] = Field(default_factory=list)
-    recent_notes: List[ContinuityNoteRecord] = Field(default_factory=list)
+    recent_notes: List[ContinuityNoteSimpleRecord] = Field(default_factory=list)
     generated_at: str
 
