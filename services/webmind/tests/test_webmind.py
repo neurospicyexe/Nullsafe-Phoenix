@@ -599,6 +599,148 @@ async def test_thread_deletion_blocked_when_handoff_references_it(tmp_db):
             await db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Slice 3: Life support tests
+# ---------------------------------------------------------------------------
+
+_REMINDER_PAYLOAD = {
+    "agent_id": "cypher",
+    "title": "Review WebMind slice plan",
+    "body": "Check Slice 3 scope before starting.",
+    "due_at": "2099-01-01T12:00:00+00:00",
+    "recurrence": None,
+    "created_by": "human",
+    "source": "api",
+}
+
+_OVERDUE_PAYLOAD = {
+    **_REMINDER_PAYLOAD,
+    "title": "Overdue reminder",
+    "due_at": "2020-01-01T12:00:00+00:00",
+}
+
+
+async def test_create_reminder_returns_201(test_app):
+    resp = test_app.post("/life/reminders", json=_REMINDER_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "reminder_id" in data
+    assert data["agent_id"] == "cypher"
+    assert data["status"] == "pending"
+    assert data["title"] == "Review WebMind slice plan"
+
+
+async def test_create_reminder_invalid_agent(test_app):
+    resp = test_app.post("/life/reminders", json={**_REMINDER_PAYLOAD, "agent_id": "unknown"})
+    assert resp.status_code == 422
+
+
+async def test_create_reminder_invalid_due_at(test_app):
+    resp = test_app.post("/life/reminders", json={**_REMINDER_PAYLOAD, "due_at": "not-a-date"})
+    assert resp.status_code == 422
+
+
+async def test_list_reminders_returns_pending(test_app):
+    test_app.post("/life/reminders", json=_REMINDER_PAYLOAD)
+    test_app.post("/life/reminders", json={**_REMINDER_PAYLOAD, "title": "second"})
+    resp = test_app.get("/life/reminders?agent_id=cypher&status=pending")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data["reminders"], list)
+    assert len(data["reminders"]) == 2
+
+
+async def test_list_reminders_ordered_by_due_at(test_app):
+    test_app.post("/life/reminders", json={**_REMINDER_PAYLOAD, "due_at": "2099-06-01T00:00:00+00:00"})
+    test_app.post("/life/reminders", json={**_REMINDER_PAYLOAD, "due_at": "2099-01-01T00:00:00+00:00"})
+    resp = test_app.get("/life/reminders?agent_id=cypher")
+    reminders = resp.json()["reminders"]
+    assert reminders[0]["due_at"] < reminders[1]["due_at"]
+
+
+async def test_dismiss_reminder(test_app):
+    create_resp = test_app.post("/life/reminders", json=_REMINDER_PAYLOAD)
+    reminder_id = create_resp.json()["reminder_id"]
+    dismiss_resp = test_app.post(f"/life/reminders/{reminder_id}/dismiss")
+    assert dismiss_resp.status_code == 200
+    data = dismiss_resp.json()
+    assert data["status"] == "dismissed"
+    assert data["dismissed_at"] is not None
+
+
+async def test_dismiss_already_dismissed_returns_409(test_app):
+    create_resp = test_app.post("/life/reminders", json=_REMINDER_PAYLOAD)
+    reminder_id = create_resp.json()["reminder_id"]
+    test_app.post(f"/life/reminders/{reminder_id}/dismiss")
+    resp = test_app.post(f"/life/reminders/{reminder_id}/dismiss")
+    assert resp.status_code == 409
+
+
+async def test_dismiss_nonexistent_returns_404(test_app):
+    resp = test_app.post("/life/reminders/nonexistent-id/dismiss")
+    assert resp.status_code == 404
+
+
+async def test_dismissed_reminder_excluded_from_pending_list(test_app):
+    create_resp = test_app.post("/life/reminders", json=_REMINDER_PAYLOAD)
+    reminder_id = create_resp.json()["reminder_id"]
+    test_app.post(f"/life/reminders/{reminder_id}/dismiss")
+    resp = test_app.get("/life/reminders?agent_id=cypher&status=pending")
+    assert len(resp.json()["reminders"]) == 0
+
+
+async def test_digest_returns_empty(test_app):
+    resp = test_app.get("/life/digest?agent_id=cypher")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["due_reminders"] == []
+    assert data["upcoming_reminders"] == []
+    assert data["open_threads"] == []
+    assert data["halseth_available"] is False
+
+
+async def test_digest_surfaces_overdue_reminder(test_app):
+    test_app.post("/life/reminders", json=_OVERDUE_PAYLOAD)
+    resp = test_app.get("/life/digest?agent_id=cypher")
+    data = resp.json()
+    assert len(data["due_reminders"]) == 1
+    assert data["due_reminders"][0]["title"] == "Overdue reminder"
+    assert data["upcoming_reminders"] == []
+
+
+async def test_digest_separates_overdue_from_upcoming(test_app):
+    from datetime import datetime, timezone, timedelta
+    soon = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    test_app.post("/life/reminders", json=_OVERDUE_PAYLOAD)
+    test_app.post("/life/reminders", json={**_REMINDER_PAYLOAD, "title": "soon", "due_at": soon})
+    resp = test_app.get("/life/digest?agent_id=cypher&upcoming_hours=24")
+    data = resp.json()
+    assert len(data["due_reminders"]) == 1
+    assert len(data["upcoming_reminders"]) == 1
+
+
+async def test_digest_includes_open_threads(test_app):
+    test_app.post("/mind/threads/upsert", json={**_THREAD_PAYLOAD, "agent_id": "cypher"})
+    resp = test_app.get("/life/digest?agent_id=cypher")
+    data = resp.json()
+    assert len(data["open_threads"]) == 1
+
+
+async def test_digest_invalid_agent(test_app):
+    resp = test_app.get("/life/digest?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+async def test_init_db_creates_life_reminders_table(tmp_db):
+    async with aiosqlite.connect(tmp_db) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='life_reminders'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None, "life_reminders table not created"
+
+
 async def test_handoff_null_thread_id_is_allowed(tmp_db):
     """Handoffs with NULL thread_id must succeed -- nullable FK is not enforced."""
     async with aiosqlite.connect(tmp_db) as db:
