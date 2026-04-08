@@ -1150,6 +1150,7 @@ async def test_reflect_transitions_phase(test_app):
         "title": "Drift detection uses cosine distance",
         "content": "The evaluator computes cosine distance between persona blocks and identity basin.",
         "model_used": "claude-sonnet-4-6",
+        "metadata": {"actor": "agent", "source": "autonomy"},
     })
     assert resp.status_code == 201
     data = resp.json()
@@ -1169,7 +1170,8 @@ async def test_reflect_rejects_completed_run(test_app):
     run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
     test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "completed"})
     resp = test_app.post(f"/autonomy/runs/{run_id}/reflect", json={
-        "reflection_type": "journal", "title": "Late reflection", "content": "too late"
+        "reflection_type": "journal", "title": "Late reflection", "content": "too late",
+        "metadata": {"actor": "agent", "source": "autonomy"},
     })
     assert resp.status_code == 409
     assert resp.json()["detail"]["code"] == "run_is_terminal"
@@ -1201,7 +1203,8 @@ async def test_get_run_detail_includes_logs_and_reflections(test_app):
     test_app.post(f"/autonomy/runs/{run_id}/log", json={"entry_type": "search", "content": "step 1"})
     test_app.post(f"/autonomy/runs/{run_id}/log", json={"entry_type": "discovery", "content": "step 2"})
     test_app.post(f"/autonomy/runs/{run_id}/reflect", json={
-        "reflection_type": "insight", "title": "Finding", "content": "synthesis output"
+        "reflection_type": "insight", "title": "Finding", "content": "synthesis output",
+        "metadata": {"actor": "agent", "source": "autonomy"},
     })
     resp = test_app.get(f"/autonomy/runs/{run_id}")
     assert resp.status_code == 200
@@ -1255,6 +1258,7 @@ async def test_full_two_phase_lifecycle(test_app):
         "title": "Drift detection insight",
         "content": "Cosine distance between persona_blocks and basin attractors measures identity drift.",
         "model_used": "claude-sonnet-4-6",
+        "metadata": {"actor": "agent", "source": "autonomy"},
     }).json()
     assert reflection["model_used"] == "claude-sonnet-4-6"
 
