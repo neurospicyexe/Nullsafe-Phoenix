@@ -1,7 +1,9 @@
 # WebMind v0 Schema + Contract Sketch (Slice 1)
 
 Created: February 24, 2026
-Status: Draft for Slice 2 implementation prep
+Status: **SUPERSEDED** -- Schema was implemented in Halseth (wm_* tables), not here.
+Live schema: `halseth/migrations/0027_webmind_v0.sql` onward through migration 0044.
+Keep as Heart Phase reference for when Phoenix implements its own WebMind layer.
 
 ## Purpose
 
