@@ -20,6 +20,18 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from services.webmind.config import Config
 from services.webmind.contracts import (
+    AutonomyReflectionRecord,
+    AutonomyRunCompleteRequest,
+    AutonomyRunDetailResponse,
+    AutonomyRunLogRecord,
+    AutonomyRunLogRequest,
+    AutonomyRunRecord,
+    AutonomyRunReflectRequest,
+    AutonomyRunStartRequest,
+    AutonomyScheduleRecord,
+    AutonomyScheduleWriteRequest,
+    AutonomySeedRecord,
+    AutonomySeedWriteRequest,
     BondHandoffRecord,
     BondHandoffWriteRequest,
     BondNoteRecord,
@@ -1239,6 +1251,441 @@ async def list_bond_notes(
         rows = await cursor.fetchall()
 
     return {"notes": [_row_to_bond_note(r) for r in rows], "agent_id": agent_id}
+
+
+# ---------------------------------------------------------------------------
+# Slice 5: Autonomy v0
+# ---------------------------------------------------------------------------
+
+def _row_to_schedule(row) -> AutonomyScheduleRecord:
+    return AutonomyScheduleRecord(
+        schedule_id=row["schedule_id"],
+        agent_id=row["agent_id"],
+        enabled=bool(row["enabled"]),
+        frequency=row["frequency"],
+        max_explore_calls=row["max_explore_calls"],
+        max_synthesize_calls=row["max_synthesize_calls"],
+        quiet_hours_start=row["quiet_hours_start"],
+        quiet_hours_end=row["quiet_hours_end"],
+        allowed_actions=json.loads(row["allowed_actions"]),
+        actor=row["actor"],
+        source=row["source"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_seed(row) -> AutonomySeedRecord:
+    return AutonomySeedRecord(
+        seed_id=row["seed_id"],
+        agent_id=row["agent_id"],
+        seed_type=row["seed_type"],
+        title=row["title"],
+        description=row["description"],
+        source_ref=row["source_ref"],
+        status=row["status"],
+        planted_by=row["planted_by"],
+        source=row["source"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_run(row) -> AutonomyRunRecord:
+    return AutonomyRunRecord(
+        run_id=row["run_id"],
+        agent_id=row["agent_id"],
+        seed_id=row["seed_id"],
+        phase=row["phase"],
+        status=row["status"],
+        explore_model=row["explore_model"],
+        synthesize_model=row["synthesize_model"],
+        explore_calls=row["explore_calls"],
+        synthesize_calls=row["synthesize_calls"],
+        max_explore_calls=row["max_explore_calls"],
+        seed_title=row["seed_title"],
+        error_message=row["error_message"],
+        actor=row["actor"],
+        source=row["source"],
+        correlation_id=row["correlation_id"],
+        started_at=row["started_at"],
+        phase_changed_at=row["phase_changed_at"],
+        completed_at=row["completed_at"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_run_log(row) -> AutonomyRunLogRecord:
+    return AutonomyRunLogRecord(
+        log_id=row["log_id"],
+        run_id=row["run_id"],
+        agent_id=row["agent_id"],
+        entry_type=row["entry_type"],
+        content=row["content"],
+        model_used=row["model_used"],
+        token_count=row["token_count"],
+        step_index=row["step_index"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_reflection(row) -> AutonomyReflectionRecord:
+    return AutonomyReflectionRecord(
+        reflection_id=row["reflection_id"],
+        run_id=row["run_id"],
+        agent_id=row["agent_id"],
+        reflection_type=row["reflection_type"],
+        title=row["title"],
+        content=row["content"],
+        model_used=row["model_used"],
+        target_ref=row["target_ref"],
+        actor=row["actor"],
+        source=row["source"],
+        created_at=row["created_at"],
+    )
+
+
+@app.post("/autonomy/schedules", response_model=AutonomyScheduleRecord, status_code=201)
+async def upsert_autonomy_schedule(request: AutonomyScheduleWriteRequest):
+    """Create or update an autonomy schedule for a companion (one per companion)."""
+    if request.quiet_hours_start and not request.quiet_hours_end:
+        raise HTTPException(status_code=422, detail={"code": "quiet_hours_end_required"})
+    if request.quiet_hours_end and not request.quiet_hours_start:
+        raise HTTPException(status_code=422, detail={"code": "quiet_hours_start_required"})
+
+    now = datetime.now(timezone.utc).isoformat()
+    schedule_id = str(uuid.uuid4())
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO autonomy_schedules
+               (schedule_id, agent_id, enabled, frequency, max_explore_calls,
+                max_synthesize_calls, quiet_hours_start, quiet_hours_end,
+                allowed_actions, actor, source, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(agent_id) DO UPDATE SET
+                   enabled              = excluded.enabled,
+                   frequency            = excluded.frequency,
+                   max_explore_calls    = excluded.max_explore_calls,
+                   max_synthesize_calls = excluded.max_synthesize_calls,
+                   quiet_hours_start    = excluded.quiet_hours_start,
+                   quiet_hours_end      = excluded.quiet_hours_end,
+                   allowed_actions      = excluded.allowed_actions,
+                   actor                = excluded.actor,
+                   source               = excluded.source,
+                   updated_at           = excluded.updated_at""",
+            (
+                schedule_id, request.agent_id, int(request.enabled),
+                request.frequency, request.max_explore_calls, request.max_synthesize_calls,
+                request.quiet_hours_start, request.quiet_hours_end,
+                json.dumps(request.allowed_actions),
+                request.metadata.actor, request.metadata.source,
+                now, now,
+            ),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT * FROM autonomy_schedules WHERE agent_id = ?", (request.agent_id,)
+        )
+        row = await cursor.fetchone()
+
+    return _row_to_schedule(row)
+
+
+@app.get("/autonomy/schedules")
+async def get_autonomy_schedule(agent_id: str = Query(...)):
+    """Get the autonomy schedule for a companion."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM autonomy_schedules WHERE agent_id = ?", (agent_id,)
+        )
+        row = await cursor.fetchone()
+
+    return {"schedule": _row_to_schedule(row) if row else None, "agent_id": agent_id}
+
+
+@app.post("/autonomy/seeds", response_model=AutonomySeedRecord, status_code=201)
+async def plant_seed(request: AutonomySeedWriteRequest):
+    """Plant an autonomy seed (companion interest, curiosity, dream, or Raziel-given topic)."""
+    now = datetime.now(timezone.utc).isoformat()
+    seed_id = str(uuid.uuid4())
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO autonomy_seeds
+               (seed_id, agent_id, seed_type, title, description, source_ref,
+                status, planted_by, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'available', ?, ?, ?)""",
+            (
+                seed_id, request.agent_id, request.seed_type,
+                request.title, request.description, request.source_ref,
+                request.metadata.actor, request.metadata.source, now,
+            ),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT * FROM autonomy_seeds WHERE seed_id = ?", (seed_id,)
+        )
+        row = await cursor.fetchone()
+
+    return _row_to_seed(row)
+
+
+@app.get("/autonomy/seeds")
+async def list_seeds(
+    agent_id: str = Query(...),
+    status: str = Query("available"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """List autonomy seeds for a companion, filtered by status."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+    if status not in ("available", "used", "expired", "dismissed"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_status"})
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM autonomy_seeds WHERE agent_id = ? AND status = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (agent_id, status, limit),
+        )
+        rows = await cursor.fetchall()
+
+    return {"seeds": [_row_to_seed(r) for r in rows], "agent_id": agent_id}
+
+
+@app.post("/autonomy/runs/start", response_model=AutonomyRunRecord, status_code=201)
+async def start_autonomy_run(request: AutonomyRunStartRequest):
+    """Begin an autonomous run. Marks seed as used; 409 if an active run already exists."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        # Guard: one active run per companion
+        cursor = await db.execute(
+            "SELECT run_id FROM autonomy_runs WHERE agent_id = ? AND status IN ('exploring', 'synthesizing')",
+            (request.agent_id,),
+        )
+        active = await cursor.fetchone()
+        if active:
+            raise HTTPException(status_code=409, detail={"code": "active_run_exists", "run_id": active["run_id"]})
+
+        seed_title = request.seed_title
+        if request.seed_id:
+            cursor = await db.execute(
+                "SELECT seed_id, title FROM autonomy_seeds WHERE seed_id = ? AND agent_id = ?",
+                (request.seed_id, request.agent_id),
+            )
+            seed_row = await cursor.fetchone()
+            if not seed_row:
+                raise HTTPException(status_code=422, detail={"code": "seed_not_found"})
+            if not seed_title:
+                seed_title = seed_row["title"]
+            await db.execute(
+                "UPDATE autonomy_seeds SET status = 'used' WHERE seed_id = ?",
+                (request.seed_id,),
+            )
+
+        run_id = str(uuid.uuid4())
+        await db.execute(
+            """INSERT INTO autonomy_runs
+               (run_id, agent_id, seed_id, phase, status, explore_model,
+                max_explore_calls, seed_title, actor, source, correlation_id, started_at, created_at)
+               VALUES (?, ?, ?, 'explore', 'exploring', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id, request.agent_id, request.seed_id,
+                request.explore_model, request.max_explore_calls, seed_title,
+                request.metadata.actor, request.metadata.source,
+                request.metadata.correlation_id, now, now,
+            ),
+        )
+        await db.commit()
+        cursor = await db.execute("SELECT * FROM autonomy_runs WHERE run_id = ?", (run_id,))
+        row = await cursor.fetchone()
+
+    return _row_to_run(row)
+
+
+@app.post("/autonomy/runs/{run_id}/log", response_model=AutonomyRunLogRecord, status_code=201)
+async def append_run_log(run_id: str, request: AutonomyRunLogRequest):
+    """Append an exploration log entry (Phase 1). Increments explore_calls on the run."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT agent_id, status FROM autonomy_runs WHERE run_id = ?", (run_id,)
+        )
+        run = await cursor.fetchone()
+        if run is None:
+            raise HTTPException(status_code=404, detail={"code": "run_not_found"})
+        if run["status"] != "exploring":
+            raise HTTPException(status_code=409, detail={"code": "run_not_in_explore_phase", "status": run["status"]})
+
+        cursor = await db.execute(
+            "SELECT COALESCE(MAX(step_index), -1) AS max_step FROM autonomy_run_logs WHERE run_id = ?",
+            (run_id,),
+        )
+        step_row = await cursor.fetchone()
+        step_index = step_row["max_step"] + 1
+
+        log_id = str(uuid.uuid4())
+        await db.execute(
+            """INSERT INTO autonomy_run_logs
+               (log_id, run_id, agent_id, entry_type, content, model_used, token_count, step_index, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (log_id, run_id, run["agent_id"], request.entry_type, request.content,
+             request.model_used, request.token_count, step_index, now),
+        )
+        await db.execute(
+            "UPDATE autonomy_runs SET explore_calls = explore_calls + 1 WHERE run_id = ?",
+            (run_id,),
+        )
+        await db.commit()
+        cursor = await db.execute("SELECT * FROM autonomy_run_logs WHERE log_id = ?", (log_id,))
+        row = await cursor.fetchone()
+
+    return _row_to_run_log(row)
+
+
+@app.post("/autonomy/runs/{run_id}/reflect", response_model=AutonomyReflectionRecord, status_code=201)
+async def write_run_reflection(run_id: str, request: AutonomyRunReflectRequest):
+    """Write a Phase 2 synthesis reflection. Auto-transitions run from explore to synthesize phase."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT agent_id, status, phase, source, actor FROM autonomy_runs WHERE run_id = ?",
+            (run_id,),
+        )
+        run = await cursor.fetchone()
+        if run is None:
+            raise HTTPException(status_code=404, detail={"code": "run_not_found"})
+        if run["status"] in ("completed", "failed", "cancelled"):
+            raise HTTPException(status_code=409, detail={"code": "run_is_terminal", "status": run["status"]})
+
+        # Auto-transition: first reflection moves run from explore phase to synthesize
+        if run["phase"] == "explore":
+            await db.execute(
+                "UPDATE autonomy_runs SET phase = 'synthesize', status = 'synthesizing', phase_changed_at = ? WHERE run_id = ?",
+                (now, run_id),
+            )
+
+        if request.model_used:
+            await db.execute(
+                "UPDATE autonomy_runs SET synthesize_model = COALESCE(synthesize_model, ?) WHERE run_id = ?",
+                (request.model_used, run_id),
+            )
+
+        await db.execute(
+            "UPDATE autonomy_runs SET synthesize_calls = synthesize_calls + 1 WHERE run_id = ?",
+            (run_id,),
+        )
+
+        reflection_id = str(uuid.uuid4())
+        await db.execute(
+            """INSERT INTO autonomy_reflections
+               (reflection_id, run_id, agent_id, reflection_type, title, content,
+                model_used, target_ref, actor, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                reflection_id, run_id, run["agent_id"],
+                request.reflection_type, request.title, request.content,
+                request.model_used, request.target_ref,
+                run["actor"], run["source"], now,
+            ),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT * FROM autonomy_reflections WHERE reflection_id = ?", (reflection_id,)
+        )
+        row = await cursor.fetchone()
+
+    return _row_to_reflection(row)
+
+
+@app.post("/autonomy/runs/{run_id}/complete", response_model=AutonomyRunRecord)
+async def complete_autonomy_run(run_id: str, request: AutonomyRunCompleteRequest):
+    """Mark a run as completed, failed, or cancelled."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT status FROM autonomy_runs WHERE run_id = ?", (run_id,)
+        )
+        run = await cursor.fetchone()
+        if run is None:
+            raise HTTPException(status_code=404, detail={"code": "run_not_found"})
+        if run["status"] in ("completed", "failed", "cancelled"):
+            raise HTTPException(status_code=409, detail={"code": "run_already_terminal", "status": run["status"]})
+
+        await db.execute(
+            "UPDATE autonomy_runs SET status = ?, completed_at = ?, error_message = ? WHERE run_id = ?",
+            (request.status, now, request.error_message, run_id),
+        )
+        await db.commit()
+        cursor = await db.execute("SELECT * FROM autonomy_runs WHERE run_id = ?", (run_id,))
+        row = await cursor.fetchone()
+
+    return _row_to_run(row)
+
+
+@app.get("/autonomy/runs/{run_id}", response_model=AutonomyRunDetailResponse)
+async def get_run_detail(run_id: str):
+    """Get full run detail: run record, exploration logs, and synthesis reflections."""
+    async with get_db() as db:
+        cursor = await db.execute("SELECT * FROM autonomy_runs WHERE run_id = ?", (run_id,))
+        run_row = await cursor.fetchone()
+        if run_row is None:
+            raise HTTPException(status_code=404, detail={"code": "run_not_found"})
+
+        cursor = await db.execute(
+            "SELECT * FROM autonomy_run_logs WHERE run_id = ? ORDER BY step_index",
+            (run_id,),
+        )
+        log_rows = await cursor.fetchall()
+
+        cursor = await db.execute(
+            "SELECT * FROM autonomy_reflections WHERE run_id = ? ORDER BY created_at",
+            (run_id,),
+        )
+        reflection_rows = await cursor.fetchall()
+
+    return AutonomyRunDetailResponse(
+        run=_row_to_run(run_row),
+        logs=[_row_to_run_log(r) for r in log_rows],
+        reflections=[_row_to_reflection(r) for r in reflection_rows],
+    )
+
+
+@app.get("/autonomy/runs")
+async def list_autonomy_runs(
+    agent_id: str = Query(...),
+    status: str = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """List recent autonomous runs for a companion."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+    valid_statuses = ("exploring", "synthesizing", "completed", "failed", "cancelled")
+    if status and status not in valid_statuses:
+        raise HTTPException(status_code=422, detail={"code": "invalid_status"})
+
+    async with get_db() as db:
+        if status:
+            cursor = await db.execute(
+                "SELECT * FROM autonomy_runs WHERE agent_id = ? AND status = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (agent_id, status, limit),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM autonomy_runs WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+                (agent_id, limit),
+            )
+        rows = await cursor.fetchall()
+
+    return {"runs": [_row_to_run(r) for r in rows], "agent_id": agent_id}
 
 
 if __name__ == "__main__":

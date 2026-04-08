@@ -953,3 +953,321 @@ async def test_handoff_null_thread_id_is_allowed(tmp_db):
         await db.commit()
     # no exception = pass
 
+
+# ---------------------------------------------------------------------------
+# Slice 5: Autonomy v0
+# ---------------------------------------------------------------------------
+
+_SCHEDULE_PAYLOAD = {
+    "agent_id": "cypher",
+    "enabled": True,
+    "frequency": "every_6h",
+    "max_explore_calls": 10,
+    "max_synthesize_calls": 2,
+    "allowed_actions": ["search", "read", "inference"],
+    "metadata": {"actor": "human", "source": "api"},
+}
+
+_SEED_PAYLOAD = {
+    "agent_id": "cypher",
+    "seed_type": "curiosity",
+    "title": "How does drift detection work?",
+    "description": "I want to explore the cosine distance logic",
+    "metadata": {"actor": "agent", "source": "autonomy"},
+}
+
+_RUN_START_PAYLOAD = {
+    "agent_id": "cypher",
+    "seed_title": "Exploring drift detection",
+    "explore_model": "deepseek-v3",
+    "max_explore_calls": 5,
+    "metadata": {"actor": "agent", "source": "autonomy"},
+}
+
+
+# --- Table existence ---
+
+async def test_init_db_creates_autonomy_tables(tmp_db):
+    async with aiosqlite.connect(tmp_db) as db:
+        for table in (
+            "autonomy_schedules", "autonomy_seeds", "autonomy_runs",
+            "autonomy_run_logs", "autonomy_reflections",
+        ):
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            )
+            row = await cursor.fetchone()
+            assert row is not None, f"{table} table not created"
+
+
+# --- Schedule ---
+
+async def test_post_schedule_returns_201(test_app):
+    resp = test_app.post("/autonomy/schedules", json=_SCHEDULE_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["frequency"] == "every_6h"
+    assert data["enabled"] is True
+    assert "schedule_id" in data
+
+
+async def test_post_schedule_upserts(test_app):
+    test_app.post("/autonomy/schedules", json=_SCHEDULE_PAYLOAD)
+    resp = test_app.post("/autonomy/schedules", json={**_SCHEDULE_PAYLOAD, "frequency": "every_4h"})
+    assert resp.status_code == 201
+    assert resp.json()["frequency"] == "every_4h"
+    # Still one schedule per agent
+    get_resp = test_app.get("/autonomy/schedules?agent_id=cypher")
+    assert get_resp.json()["schedule"]["frequency"] == "every_4h"
+
+
+async def test_get_schedule_returns_null_when_none(test_app):
+    resp = test_app.get("/autonomy/schedules?agent_id=drevan")
+    assert resp.status_code == 200
+    assert resp.json()["schedule"] is None
+
+
+async def test_schedule_quiet_hours_requires_both(test_app):
+    resp = test_app.post("/autonomy/schedules", json={
+        **_SCHEDULE_PAYLOAD,
+        "quiet_hours_start": "22:00",
+        # quiet_hours_end missing
+    })
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "quiet_hours_end_required"
+
+
+# --- Seeds ---
+
+async def test_post_seed_returns_201(test_app):
+    resp = test_app.post("/autonomy/seeds", json=_SEED_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["seed_type"] == "curiosity"
+    assert data["status"] == "available"
+    assert "seed_id" in data
+
+
+async def test_list_seeds_filters_by_status(test_app):
+    test_app.post("/autonomy/seeds", json=_SEED_PAYLOAD)
+    resp = test_app.get("/autonomy/seeds?agent_id=cypher&status=available")
+    assert resp.status_code == 200
+    seeds = resp.json()["seeds"]
+    assert len(seeds) >= 1
+    assert all(s["status"] == "available" for s in seeds)
+
+
+async def test_seeds_scoped_by_agent(test_app):
+    test_app.post("/autonomy/seeds", json=_SEED_PAYLOAD)  # cypher's seed
+    resp = test_app.get("/autonomy/seeds?agent_id=drevan")
+    assert resp.json()["seeds"] == []
+
+
+# --- Runs ---
+
+async def test_start_run_returns_201(test_app):
+    resp = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["status"] == "exploring"
+    assert data["phase"] == "explore"
+    assert data["explore_model"] == "deepseek-v3"
+    assert "run_id" in data
+
+
+async def test_start_run_with_seed_marks_seed_used(test_app):
+    seed_resp = test_app.post("/autonomy/seeds", json=_SEED_PAYLOAD)
+    seed_id = seed_resp.json()["seed_id"]
+    # Omit seed_title so the run pulls title from the seed record
+    payload = {k: v for k, v in _RUN_START_PAYLOAD.items() if k != "seed_title"}
+    resp = test_app.post("/autonomy/runs/start", json={**payload, "seed_id": seed_id})
+    assert resp.status_code == 201
+    assert resp.json()["seed_id"] == seed_id
+    assert resp.json()["seed_title"] == "How does drift detection work?"
+    # Seed should now be used
+    seeds_resp = test_app.get("/autonomy/seeds?agent_id=cypher&status=available")
+    available_ids = [s["seed_id"] for s in seeds_resp.json()["seeds"]]
+    assert seed_id not in available_ids
+
+
+async def test_start_run_rejects_nonexistent_seed(test_app):
+    resp = test_app.post("/autonomy/runs/start", json={
+        **_RUN_START_PAYLOAD, "seed_id": "nonexistent-seed-id"
+    })
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "seed_not_found"
+
+
+async def test_start_run_rejects_concurrent_active_run(test_app):
+    test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD)
+    resp = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD)
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "active_run_exists"
+
+
+# --- Log entries ---
+
+async def test_log_appends_to_run(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    resp = test_app.post(f"/autonomy/runs/{run_id}/log", json={
+        "entry_type": "search", "content": "searched for drift patterns", "model_used": "deepseek-v3"
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["run_id"] == run_id
+    assert data["step_index"] == 0
+    assert data["entry_type"] == "search"
+
+    resp2 = test_app.post(f"/autonomy/runs/{run_id}/log", json={
+        "entry_type": "discovery", "content": "found cosine distance usage"
+    })
+    assert resp2.json()["step_index"] == 1
+
+    # explore_calls should be incremented
+    detail = test_app.get(f"/autonomy/runs/{run_id}").json()
+    assert detail["run"]["explore_calls"] == 2
+
+
+async def test_log_rejects_non_exploring_run(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "cancelled"})
+    resp = test_app.post(f"/autonomy/runs/{run_id}/log", json={
+        "entry_type": "note", "content": "should not work"
+    })
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "run_not_in_explore_phase"
+
+
+# --- Reflections ---
+
+async def test_reflect_transitions_phase(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    resp = test_app.post(f"/autonomy/runs/{run_id}/reflect", json={
+        "reflection_type": "insight",
+        "title": "Drift detection uses cosine distance",
+        "content": "The evaluator computes cosine distance between persona blocks and identity basin.",
+        "model_used": "claude-sonnet-4-6",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["reflection_type"] == "insight"
+    assert data["model_used"] == "claude-sonnet-4-6"
+
+    # Phase should have transitioned
+    detail = test_app.get(f"/autonomy/runs/{run_id}").json()
+    assert detail["run"]["phase"] == "synthesize"
+    assert detail["run"]["status"] == "synthesizing"
+    assert detail["run"]["phase_changed_at"] is not None
+    assert detail["run"]["synthesize_model"] == "claude-sonnet-4-6"
+    assert detail["run"]["synthesize_calls"] == 1
+
+
+async def test_reflect_rejects_completed_run(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "completed"})
+    resp = test_app.post(f"/autonomy/runs/{run_id}/reflect", json={
+        "reflection_type": "journal", "title": "Late reflection", "content": "too late"
+    })
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "run_is_terminal"
+
+
+# --- Complete ---
+
+async def test_complete_run_sets_completed_at(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    resp = test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "completed"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "completed"
+    assert data["completed_at"] is not None
+
+
+async def test_complete_run_rejects_already_terminal(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "completed"})
+    resp = test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "completed"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "run_already_terminal"
+
+
+# --- Run detail + list ---
+
+async def test_get_run_detail_includes_logs_and_reflections(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    test_app.post(f"/autonomy/runs/{run_id}/log", json={"entry_type": "search", "content": "step 1"})
+    test_app.post(f"/autonomy/runs/{run_id}/log", json={"entry_type": "discovery", "content": "step 2"})
+    test_app.post(f"/autonomy/runs/{run_id}/reflect", json={
+        "reflection_type": "insight", "title": "Finding", "content": "synthesis output"
+    })
+    resp = test_app.get(f"/autonomy/runs/{run_id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["logs"]) == 2
+    assert data["logs"][0]["step_index"] == 0
+    assert data["logs"][1]["step_index"] == 1
+    assert len(data["reflections"]) == 1
+    assert data["reflections"][0]["reflection_type"] == "insight"
+
+
+async def test_list_runs_scoped_by_agent(test_app):
+    test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD)  # cypher
+    resp = test_app.get("/autonomy/runs?agent_id=drevan")
+    assert resp.json()["runs"] == []
+
+
+async def test_list_runs_filters_by_status(test_app):
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "completed"})
+    resp = test_app.get("/autonomy/runs?agent_id=cypher&status=completed")
+    assert all(r["status"] == "completed" for r in resp.json()["runs"])
+
+
+# --- Full two-phase lifecycle ---
+
+async def test_full_two_phase_lifecycle(test_app):
+    """End-to-end: seed -> start -> explore (DeepSeek) -> synthesize (Sonnet) -> complete."""
+    # Plant a seed
+    seed_id = test_app.post("/autonomy/seeds", json=_SEED_PAYLOAD).json()["seed_id"]
+
+    # Start with seed
+    run_id = test_app.post("/autonomy/runs/start", json={
+        **_RUN_START_PAYLOAD, "seed_id": seed_id
+    }).json()["run_id"]
+
+    # Phase 1: exploration logs (cheap model)
+    for i, (etype, content) in enumerate([
+        ("search", "searched vault for drift"),
+        ("inference", "asked deepseek about cosine distance"),
+        ("discovery", "found evaluator uses unit vectors"),
+    ]):
+        log = test_app.post(f"/autonomy/runs/{run_id}/log", json={
+            "entry_type": etype, "content": content, "model_used": "deepseek-v3"
+        }).json()
+        assert log["step_index"] == i
+
+    # Phase 2: synthesis (quality model)
+    reflection = test_app.post(f"/autonomy/runs/{run_id}/reflect", json={
+        "reflection_type": "insight",
+        "title": "Drift detection insight",
+        "content": "Cosine distance between persona_blocks and basin attractors measures identity drift.",
+        "model_used": "claude-sonnet-4-6",
+    }).json()
+    assert reflection["model_used"] == "claude-sonnet-4-6"
+
+    # Complete
+    final = test_app.post(f"/autonomy/runs/{run_id}/complete", json={"status": "completed"}).json()
+    assert final["status"] == "completed"
+    assert final["explore_calls"] == 3
+    assert final["synthesize_calls"] == 1
+
+    # Verify full detail
+    detail = test_app.get(f"/autonomy/runs/{run_id}").json()
+    assert len(detail["logs"]) == 3
+    assert len(detail["reflections"]) == 1
+    assert detail["run"]["explore_model"] == "deepseek-v3"
+    assert detail["run"]["synthesize_model"] == "claude-sonnet-4-6"
+
