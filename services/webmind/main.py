@@ -15,7 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from services.webmind.config import Config
 from services.webmind.contracts import (
@@ -62,22 +63,43 @@ async def lifespan(app: FastAPI):
     yield
 
 
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def verify_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
+) -> None:
+    """Enforce Bearer token when WEBMIND_AUTH_TOKEN is configured.
+
+    When the token is not set (local dev), all requests pass through.
+    When set, any request missing or supplying the wrong token gets 401.
+    """
+    if not Config.WEBMIND_AUTH_TOKEN:
+        return
+    if credentials is None or credentials.credentials != Config.WEBMIND_AUTH_TOKEN:
+        raise HTTPException(status_code=401, detail={"code": "unauthorized"})
+
+
 app = FastAPI(
     title="Nullsafe Phoenix WebMind",
     version="v0-slice2-scaffold",
     description="Persistent continuity and mind-state API (scaffold)",
     lifespan=lifespan,
+    dependencies=[Depends(verify_token)],
 )
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    db_type = "sqlite" if Config.WEBMIND_DB_URL.startswith("sqlite") else "postgres"
     return {
         "status": "ok",
         "service": "webmind",
         "version": "v0-slice2-scaffold",
-        "db_url": Config.WEBMIND_DB_URL,
+        "db_configured": True,
+        "db_type": db_type,
+        "halseth_configured": bool(Config.HALSETH_URL),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -423,6 +445,21 @@ async def create_session_handoff(request: SessionHandoffWriteRequest):
     now = datetime.now(timezone.utc).isoformat()
 
     async with get_db() as db:
+        # Validate thread_id belongs to this agent before insert -- gives 422 not 500
+        if request.thread_id is not None:
+            cursor = await db.execute(
+                "SELECT 1 FROM mind_threads WHERE thread_key = ? AND agent_id = ?",
+                (request.thread_id, request.agent_id),
+            )
+            if await cursor.fetchone() is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "thread_not_found",
+                        "message": f"thread_id '{request.thread_id}' does not exist for agent '{request.agent_id}'",
+                    },
+                )
+
         await db.execute(
             """INSERT INTO session_handoffs
                (handoff_id, agent_id, thread_id, title, summary, next_steps, open_loops,
@@ -492,56 +529,72 @@ async def get_session_handoffs(
 
 @app.post("/mind/threads/upsert", response_model=MindThreadRecord)
 async def upsert_mind_thread(request: MindThreadUpsertRequest):
-    """Create or update a persistent mind thread."""
+    """Create or update a persistent mind thread.
+
+    Uses INSERT ... ON CONFLICT DO UPDATE so the create/update decision is
+    atomic -- no torn-write window between SELECT and INSERT/UPDATE.
+    Previous state is read before the upsert solely for the event log payload.
+    """
     now = datetime.now(timezone.utc).isoformat()
     thread_key = request.thread_key or str(uuid.uuid4())
+    incoming_status = request.status or "open"
 
     async with get_db() as db:
+        # Read previous state for event payload -- read-before-write is safe
+        # because the upsert below is atomic. A concurrent delete between here
+        # and the upsert would cause an FK violation on the event insert, not
+        # a silent no-op.
         cursor = await db.execute(
-            "SELECT thread_key FROM mind_threads WHERE thread_key = ? AND agent_id = ?",
+            "SELECT status, title FROM mind_threads WHERE thread_key = ? AND agent_id = ?",
             (thread_key, request.agent_id),
         )
-        existing = await cursor.fetchone()
+        previous = await cursor.fetchone()
+        event_type = "updated" if previous else "created"
 
-        if existing:
-            await db.execute(
-                """UPDATE mind_threads SET
-                   title = ?, description = ?,
-                   status = COALESCE(?, status),
-                   priority = ?, lane = COALESCE(?, lane),
-                   last_touched_at = ?, updated_at = ?,
-                   updated_by_actor = ?, source = ?,
-                   correlation_id = ?
-                   WHERE thread_key = ? AND agent_id = ?""",
-                (
-                    request.title, request.description,
-                    request.status,
-                    request.priority,
-                    request.lane,
-                    now, now,
-                    request.metadata.actor, request.metadata.source,
-                    request.metadata.correlation_id,
-                    thread_key, request.agent_id,
-                ),
-            )
-            event_type = "updated"
-        else:
-            status = request.status or "open"
-            await db.execute(
-                """INSERT INTO mind_threads
-                   (thread_key, agent_id, title, description, status, priority, lane,
-                    last_touched_at, created_at, updated_at,
-                    created_by_actor, updated_by_actor, source, correlation_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    thread_key, request.agent_id, request.title, request.description,
-                    status, request.priority, request.lane,
-                    now, now, now,
-                    request.metadata.actor, request.metadata.actor,
-                    request.metadata.source, request.metadata.correlation_id,
-                ),
-            )
-            event_type = "created"
+        # Atomic upsert -- SQLite 3.24+ ON CONFLICT DO UPDATE
+        await db.execute(
+            """INSERT INTO mind_threads
+               (thread_key, agent_id, title, description, status, priority, lane,
+                last_touched_at, created_at, updated_at,
+                created_by_actor, updated_by_actor, source, correlation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (thread_key, agent_id) DO UPDATE SET
+                   title            = excluded.title,
+                   description      = excluded.description,
+                   status           = COALESCE(excluded.status, mind_threads.status),
+                   priority         = excluded.priority,
+                   lane             = COALESCE(excluded.lane, mind_threads.lane),
+                   last_touched_at  = excluded.last_touched_at,
+                   updated_at       = excluded.updated_at,
+                   updated_by_actor = excluded.updated_by_actor,
+                   source           = excluded.source,
+                   correlation_id   = excluded.correlation_id""",
+            (
+                thread_key, request.agent_id, request.title, request.description,
+                incoming_status, request.priority, request.lane,
+                now, now, now,
+                request.metadata.actor, request.metadata.actor,
+                request.metadata.source, request.metadata.correlation_id,
+            ),
+        )
+
+        # Enrich event payload with previous state so Bond Layer drift detection
+        # can see what actually changed, not just the new values.
+        payload: dict = {"title": request.title, "priority": request.priority}
+        if event_type == "updated" and previous:
+            payload["previous_status"] = previous["status"]
+            payload["previous_title"] = previous["title"]
+            if request.status and request.status != previous["status"]:
+                event_type = "status_changed"
+
+        event_summary = (
+            request.title
+            if event_type == "created"
+            else f"{previous['title']} → {request.title}" if request.title != previous["title"]
+            else f"status: {previous['status']} → {payload.get('previous_status', previous['status'])}"
+            if event_type == "status_changed"
+            else f"updated: {request.title}"
+        )
 
         event_id = str(uuid.uuid4())
         await db.execute(
@@ -551,8 +604,8 @@ async def upsert_mind_thread(request: MindThreadUpsertRequest):
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 event_id, thread_key, request.agent_id,
-                event_type, request.title,
-                json.dumps({"title": request.title, "priority": request.priority}),
+                event_type, event_summary,
+                json.dumps(payload),
                 request.metadata.actor, request.metadata.source,
                 request.metadata.correlation_id, now,
             ),
@@ -818,8 +871,11 @@ async def life_digest(
                         for t in tasks
                     ]
                     halseth_available = True
-        except Exception:
-            pass  # Halseth down -- digest still returns local data
+        except Exception as e:
+            # Graceful degradation -- Halseth down or misconfigured.
+            # Log at debug so operators can distinguish a typo in HALSETH_URL
+            # from an expected transient outage.
+            logger.debug("Halseth task fetch failed (digest will skip tasks): %s", e)
 
     return LifeDigestResponse(
         agent_id=agent_id,

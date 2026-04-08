@@ -119,7 +119,13 @@ class MindThreadEventRecord(BaseModel):
 
 
 class ContinuityNoteWriteRequest(BaseModel):
-    """Append-only continuity note contract."""
+    """Append-only continuity note contract (full metadata version).
+
+    Reserved for a future slice that adds note_type + salience to the DB schema.
+    The live /mind/notes endpoint currently uses ContinuityNoteSimpleWriteRequest.
+    Do NOT add a second /mind/notes endpoint until the schema is extended -- it
+    would conflict with the existing route.
+    """
 
     agent_id: AgentId
     thread_key: Optional[str] = None
@@ -130,7 +136,10 @@ class ContinuityNoteWriteRequest(BaseModel):
 
 
 class ContinuityNoteRecord(BaseModel):
-    """Stored/retrieved continuity note."""
+    """Stored/retrieved continuity note (full metadata version).
+
+    Pair to ContinuityNoteWriteRequest -- reserved for the same future slice.
+    """
 
     note_id: str
     agent_id: AgentId

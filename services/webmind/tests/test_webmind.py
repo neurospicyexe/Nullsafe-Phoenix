@@ -30,55 +30,56 @@ from services.webmind.contracts import (
 )
 from services.webmind.main import app
 
-client = TestClient(app)
+
+# ---------------------------------------------------------------------------
+# Health + route smoke tests (isolated via test_app fixture)
+# ---------------------------------------------------------------------------
+
+async def test_health_check(test_app):
+    """Health endpoint returns metadata without leaking db_url."""
+    response = test_app.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["service"] == "webmind"
+    assert data["db_configured"] is True
+    assert "db_type" in data
+    assert "db_url" not in data  # must not leak connection string
+    assert "timestamp" in data
 
 
-class TestHealthEndpoint:
-    """Test suite for /health endpoint."""
-
-    def test_health_check(self):
-        """Health endpoint returns service metadata."""
-        response = client.get("/health")
-        assert response.status_code == 200
-
-        data = response.json()
-        assert data["status"] == "ok"
-        assert data["service"] == "webmind"
-        assert data["version"] == "v0-slice2-scaffold"
-        assert "db_url" in data
-        assert "timestamp" in data
+async def test_mind_orient_returns_200(test_app):
+    """Orient returns 200 with empty state when no data written."""
+    response = test_app.get("/mind/orient", params={"agent_id": "cypher"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == "cypher"
 
 
-class TestStubEndpoints:
-    """Validate route presence before repository implementation lands."""
-
-    async def test_mind_orient_returns_200(self, test_app):
-        # orient is now implemented; returns 200 with empty state (no db writes here)
-        response = test_app.get("/mind/orient", params={"agent_id": "cypher"})
-        assert response.status_code == 200
-        data = response.json()
-        assert data["agent_id"] == "cypher"
-
-    def test_mind_thread_upsert_creates_thread(self):
-        response = client.post(
-            "/mind/threads/upsert",
-            json={
-                "agent_id": "drevan",
-                "title": "Continue WebMind slice work",
-                "priority": 6,
-                "lane": "ops",
-                "metadata": {"actor": "agent", "source": "system"},
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["agent_id"] == "drevan"
-        assert data["title"] == "Continue WebMind slice work"
-        assert data["status"] == "open"
+async def test_mind_thread_upsert_creates_thread(test_app):
+    """Thread upsert creates a new thread and returns it."""
+    response = test_app.post(
+        "/mind/threads/upsert",
+        json={
+            "agent_id": "drevan",
+            "title": "Continue WebMind slice work",
+            "priority": 6,
+            "lane": "ops",
+            "metadata": {"actor": "agent", "source": "system"},
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == "drevan"
+    assert data["title"] == "Continue WebMind slice work"
+    assert data["status"] == "open"
 
 
 class TestContracts:
-    """Contract validation for reserved WebMind request models."""
+    """Contract validation for reserved WebMind request models.
+
+    Pure Pydantic tests -- no DB or HTTP. Safe as a class with no fixture dependency.
+    """
 
     def test_session_handoff_write_request_valid(self):
         req = SessionHandoffWriteRequest(
@@ -540,7 +541,12 @@ async def test_init_db_creates_mind_thread_events_table(tmp_db):
 # ---------------------------------------------------------------------------
 
 async def test_thread_event_fk_rejects_orphan(tmp_db):
-    """Inserting a thread event with no parent thread must raise IntegrityError."""
+    """Inserting a thread event with no parent thread must raise IntegrityError.
+
+    Note: SQLite may raise on execute() or on commit() depending on deferred vs
+    immediate FK enforcement. Both db.execute() and db.commit() are inside the
+    pytest.raises block so either timing is caught correctly.
+    """
     import pytest
     async with aiosqlite.connect(tmp_db) as db:
         await db.execute("PRAGMA foreign_keys = ON")

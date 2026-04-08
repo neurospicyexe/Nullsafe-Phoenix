@@ -159,6 +159,12 @@ async def init_db() -> None:
 
     Order matters: mind_threads must exist before session_handoffs and
     mind_thread_events, which hold FKs into it.
+
+    Note: this uses aiosqlite.connect() directly (not get_db()) because DDL
+    does not return rows and does not need row_factory. If you ever add a
+    read inside init_db (e.g. a migration version check), use get_db() or
+    set db.row_factory = aiosqlite.Row explicitly -- bare connect() returns
+    tuples, not Row objects.
     """
     async with aiosqlite.connect(_DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
