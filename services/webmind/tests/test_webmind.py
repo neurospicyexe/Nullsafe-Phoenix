@@ -1275,3 +1275,401 @@ async def test_full_two_phase_lifecycle(test_app):
     assert detail["run"]["explore_model"] == "deepseek-v3"
     assert detail["run"]["synthesize_model"] == "claude-sonnet-4-6"
 
+
+# ---------------------------------------------------------------------------
+# Slice 6: Growth Layer
+# ---------------------------------------------------------------------------
+
+_JOURNAL_PAYLOAD = {
+    "agent_id": "cypher",
+    "entry_type": "insight",
+    "content": "I noticed that drift detection uses cosine distance as a proxy for identity coherence.",
+    "salience": "normal",
+    "tags": ["drift", "identity"],
+    "metadata": {"actor": "agent", "source": "autonomy"},
+}
+
+_PATTERN_PAYLOAD = {
+    "agent_id": "cypher",
+    "pattern_name": "Cosine drift pattern",
+    "description": "When persona blocks diverge from basin attractors, cosine distance rises above 0.3.",
+    "supporting_evidence": ["session 2026-04-01", "session 2026-04-03"],
+    "confidence": "normal",
+    "first_observed_at": "2026-04-01T00:00:00+00:00",
+    "recurrence_count": 3,
+    "metadata": {"actor": "agent", "source": "autonomy"},
+}
+
+_MARKER_PAYLOAD = {
+    "agent_id": "cypher",
+    "marker_type": "milestone",
+    "title": "First autonomous synthesis complete",
+    "context": "Completed first full two-phase autonomy run without Raziel prompting.",
+    "metadata": {"actor": "agent", "source": "autonomy"},
+}
+
+
+# --- Table creation ---
+
+async def test_init_db_creates_growth_tables(tmp_db):
+    async with aiosqlite.connect(tmp_db) as db:
+        for table in ("growth_journal", "growth_patterns", "growth_markers"):
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            )
+            row = await cursor.fetchone()
+            assert row is not None, f"{table} table not created"
+
+
+# --- Write + read ---
+
+async def test_post_growth_journal_returns_201(test_app):
+    resp = test_app.post("/growth/journal", json=_JOURNAL_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["entry_type"] == "insight"
+    assert data["salience"] == "normal"
+    assert data["tags"] == ["drift", "identity"]
+    assert "entry_id" in data
+
+
+async def test_list_growth_journal_filters_entry_type(test_app):
+    test_app.post("/growth/journal", json=_JOURNAL_PAYLOAD)
+    test_app.post("/growth/journal", json={**_JOURNAL_PAYLOAD, "entry_type": "observation", "content": "observation entry"})
+    resp = test_app.get("/growth/journal?agent_id=cypher&entry_type=observation")
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    assert len(entries) == 1
+    assert entries[0]["entry_type"] == "observation"
+
+
+async def test_list_growth_journal_exclude_sources(test_app):
+    """exclude_sources filters out machine synthesizer output (anti-feedback loop)."""
+    test_app.post("/growth/journal", json={**_JOURNAL_PAYLOAD, "metadata": {"actor": "agent", "source": "autonomy"}})
+    test_app.post("/growth/journal", json={**_JOURNAL_PAYLOAD, "content": "human entry", "metadata": {"actor": "human", "source": "api"}})
+    resp = test_app.get("/growth/journal?agent_id=cypher&exclude_sources=autonomy")
+    entries = resp.json()["entries"]
+    assert all(e["source"] != "autonomy" for e in entries)
+    assert len(entries) == 1
+    assert entries[0]["source"] == "api"
+
+
+async def test_post_growth_pattern_returns_201(test_app):
+    resp = test_app.post("/growth/patterns", json=_PATTERN_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["pattern_name"] == "Cosine drift pattern"
+    assert data["confidence"] == "normal"
+    assert data["recurrence_count"] == 3
+    assert "pattern_id" in data
+
+
+async def test_list_growth_patterns_ordered_by_recurrence(test_app):
+    test_app.post("/growth/patterns", json={**_PATTERN_PAYLOAD, "pattern_name": "rare", "recurrence_count": 1})
+    test_app.post("/growth/patterns", json={**_PATTERN_PAYLOAD, "pattern_name": "frequent", "recurrence_count": 10})
+    resp = test_app.get("/growth/patterns?agent_id=cypher")
+    patterns = resp.json()["patterns"]
+    assert patterns[0]["recurrence_count"] >= patterns[1]["recurrence_count"]
+
+
+async def test_post_growth_marker_returns_201(test_app):
+    resp = test_app.post("/growth/markers", json=_MARKER_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["agent_id"] == "cypher"
+    assert data["marker_type"] == "milestone"
+    assert data["title"] == "First autonomous synthesis complete"
+    assert "marker_id" in data
+
+
+async def test_list_growth_markers_filters_marker_type(test_app):
+    test_app.post("/growth/markers", json=_MARKER_PAYLOAD)
+    test_app.post("/growth/markers", json={**_MARKER_PAYLOAD, "marker_type": "shift", "title": "Shift marker"})
+    resp = test_app.get("/growth/markers?agent_id=cypher&marker_type=shift")
+    markers = resp.json()["markers"]
+    assert len(markers) == 1
+    assert markers[0]["marker_type"] == "shift"
+
+
+async def test_growth_entries_scoped_by_agent(test_app):
+    """Growth tables are per-agent; cypher's entries don't appear for drevan."""
+    test_app.post("/growth/journal", json=_JOURNAL_PAYLOAD)
+    test_app.post("/growth/patterns", json=_PATTERN_PAYLOAD)
+    test_app.post("/growth/markers", json=_MARKER_PAYLOAD)
+    assert test_app.get("/growth/journal?agent_id=drevan").json()["entries"] == []
+    assert test_app.get("/growth/patterns?agent_id=drevan").json()["patterns"] == []
+    assert test_app.get("/growth/markers?agent_id=drevan").json()["markers"] == []
+
+
+async def test_growth_journal_invalid_agent(test_app):
+    resp = test_app.get("/growth/journal?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+async def test_growth_marker_invalid_type(test_app):
+    resp = test_app.get("/growth/markers?agent_id=cypher&marker_type=invalid")
+    assert resp.status_code == 422
+
+
+# --- Cap enforcement ---
+
+async def test_growth_journal_cap_prunes_low_first(test_app):
+    """201 LOW entries -- cap fires, exactly 200 remain (oldest pruned)."""
+    for i in range(201):
+        test_app.post("/growth/journal", json={
+            **_JOURNAL_PAYLOAD,
+            "salience": "low",
+            "content": f"low entry {i}",
+        })
+    # Fetch via two pages (limit capped at 100) to verify total == 200 exactly
+    import aiosqlite as _aio
+    import services.webmind.database as db_module
+    async with _aio.connect(db_module._DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM growth_journal WHERE agent_id = ?", ("cypher",)
+        )
+        row = await cursor.fetchone()
+        assert row[0] == 200, f"Expected exactly 200 rows, got {row[0]}"
+
+    # Verify direction: oldest (entry 0) pruned, newest (entry 200) present
+    page1 = test_app.get("/growth/journal?agent_id=cypher&limit=100").json()["entries"]
+    contents = {e["content"] for e in page1}
+    assert "low entry 0" not in contents  # oldest was pruned
+    assert "low entry 200" in contents    # newest survived
+
+
+async def test_growth_journal_high_never_pruned(test_app):
+    """HIGH entries are exempt from the cap; they accumulate beyond 200 without being pruned."""
+    # Fill to cap with LOW entries
+    for i in range(200):
+        test_app.post("/growth/journal", json={
+            **_JOURNAL_PAYLOAD,
+            "salience": "low",
+            "content": f"low {i}",
+        })
+    # Write a HIGH entry -- should survive even after more LOWs come in
+    high_resp = test_app.post("/growth/journal", json={
+        **_JOURNAL_PAYLOAD,
+        "salience": "high",
+        "content": "this is important and must never be pruned",
+    })
+    assert high_resp.status_code == 201
+    high_id = high_resp.json()["entry_id"]
+
+    # Write another LOW -- this should prune one LOW, not the HIGH
+    test_app.post("/growth/journal", json={**_JOURNAL_PAYLOAD, "salience": "low", "content": "new low"})
+
+    # HIGH entry must still exist
+    all_resp = test_app.get("/growth/journal?agent_id=cypher&limit=100")
+    entry_ids = {e["entry_id"] for e in all_resp.json()["entries"]}
+    assert high_id in entry_ids
+
+
+async def test_growth_journal_cap_prunes_normal_after_low_gone(test_app):
+    """When no LOW entries remain, NORMAL entries are pruned."""
+    # Write 200 NORMAL entries (fill to cap)
+    for i in range(200):
+        test_app.post("/growth/journal", json={
+            **_JOURNAL_PAYLOAD,
+            "salience": "normal",
+            "content": f"normal {i}",
+        })
+    # One more NORMAL should prune the oldest NORMAL
+    test_app.post("/growth/journal", json={
+        **_JOURNAL_PAYLOAD,
+        "salience": "normal",
+        "content": "normal 200",
+    })
+    all_entries = test_app.get("/growth/journal?agent_id=cypher&limit=100").json()["entries"]
+    contents = {e["content"] for e in all_entries}
+    assert "normal 0" not in contents  # oldest NORMAL was pruned
+    assert "normal 200" in contents     # newest is present
+
+
+async def test_growth_patterns_cap_prunes_low_confidence(test_app):
+    """51 patterns -- oldest LOW confidence pruned to stay at 50."""
+    for i in range(51):
+        test_app.post("/growth/patterns", json={
+            **_PATTERN_PAYLOAD,
+            "confidence": "low",
+            "pattern_name": f"low pattern {i}",
+        })
+    patterns = test_app.get("/growth/patterns?agent_id=cypher&limit=100").json()["patterns"]
+    names = {p["pattern_name"] for p in patterns}
+    assert "low pattern 0" not in names  # oldest pruned
+    assert len(patterns) <= 50
+
+
+async def test_growth_markers_cap_prunes_oldest(test_app):
+    """101 markers -- oldest pruned to stay at 100 (no salience awareness)."""
+    for i in range(101):
+        test_app.post("/growth/markers", json={
+            **_MARKER_PAYLOAD,
+            "title": f"marker {i}",
+        })
+    markers = test_app.get("/growth/markers?agent_id=cypher&limit=100").json()["markers"]
+    titles = {m["title"] for m in markers}
+    assert "marker 0" not in titles  # oldest pruned
+    assert len(markers) <= 100
+
+
+async def test_continuity_notes_retroactive_cap(test_app):
+    """POST /mind/notes now enforces 100/agent cap retroactively."""
+    note_payload = {
+        "agent_id": "cypher",
+        "note_type": "continuity",
+        "note_text": "note placeholder",
+        "metadata": {"actor": "agent", "source": "autonomy"},
+    }
+    # Write 101 notes
+    first_note_id = None
+    for i in range(101):
+        resp = test_app.post("/mind/notes", json={**note_payload, "note_text": f"note {i}"})
+        assert resp.status_code == 201
+        if i == 0:
+            first_note_id = resp.json()["note_id"]
+
+    # List and verify oldest was pruned
+    resp = test_app.get("/mind/notes?agent_id=cypher&limit=100")
+    assert resp.status_code == 200
+    notes = resp.json()["notes"]
+    note_ids = {n["note_id"] for n in notes}
+    assert first_note_id not in note_ids  # oldest note pruned
+    assert len(notes) <= 100
+
+
+# --- Housekeeping ---
+
+async def test_housekeeping_response_shape(test_app):
+    resp = test_app.post("/growth/housekeeping")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "pruned" in data
+    assert "autonomy_run_logs" in data["pruned"]
+    assert "mind_thread_events" in data["pruned"]
+    assert "ran_at" in data
+
+
+async def test_housekeeping_prunes_old_run_logs(test_app):
+    """Run logs older than 90 days are deleted by housekeeping."""
+    import aiosqlite as _aio
+    import services.webmind.database as db_module
+
+    old_ts = "2025-01-01T00:00:00+00:00"
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    # Back-date a log directly
+    async with _aio.connect(db_module._DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        log_id = "old-log-1"
+        await db.execute(
+            "INSERT INTO autonomy_run_logs (log_id, run_id, agent_id, entry_type, content, step_index, created_at) "
+            "VALUES (?, ?, 'cypher', 'note', 'stale log', 0, ?)",
+            (log_id, run_id, old_ts),
+        )
+        await db.commit()
+
+    resp = test_app.post("/growth/housekeeping")
+    assert resp.json()["pruned"]["autonomy_run_logs"] >= 1
+
+
+async def test_housekeeping_keeps_recent_run_logs(test_app):
+    """Run logs written today are NOT deleted by housekeeping."""
+    run_id = test_app.post("/autonomy/runs/start", json=_RUN_START_PAYLOAD).json()["run_id"]
+    test_app.post(f"/autonomy/runs/{run_id}/log", json={"entry_type": "note", "content": "recent log"})
+
+    resp = test_app.post("/growth/housekeeping")
+    # pruned count should be 0 for fresh logs
+    assert resp.json()["pruned"]["autonomy_run_logs"] == 0
+
+
+async def test_housekeeping_prunes_old_thread_events(test_app):
+    """Thread events older than 90 days are deleted by housekeeping."""
+    import aiosqlite as _aio
+    import services.webmind.database as db_module
+
+    old_ts = "2025-01-01T00:00:00+00:00"
+    # Create a thread first, then back-date an event
+    thread_resp = test_app.post("/mind/threads/upsert", json={
+        "agent_id": "cypher", "thread_id": "t-hk-1", "title": "HK test thread",
+        "metadata": {"actor": "agent", "source": "api"},
+    })
+    assert thread_resp.status_code == 200
+    thread_key = thread_resp.json()["thread_key"]
+
+    async with _aio.connect(db_module._DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            "INSERT INTO mind_thread_events "
+            "(event_id, thread_key, agent_id, event_type, event_summary, payload_json, actor, source, created_at) "
+            "VALUES ('evt-old-1', ?, 'cypher', 'status_changed', 'old event', '{}', 'agent', 'api', ?)",
+            (thread_key, old_ts),
+        )
+        await db.commit()
+
+    resp = test_app.post("/growth/housekeeping")
+    assert resp.json()["pruned"]["mind_thread_events"] >= 1
+
+
+# --- Search ---
+
+async def test_search_finds_journal_content(test_app):
+    test_app.post("/growth/journal", json={**_JOURNAL_PAYLOAD, "content": "unique-cosine-probe-word in journal"})
+    resp = test_app.get("/growth/search?q=unique-cosine-probe-word&agent_id=cypher")
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert len(results) >= 1
+    assert any(r["source_table"] == "growth_journal" for r in results)
+
+
+async def test_search_finds_pattern_name(test_app):
+    test_app.post("/growth/patterns", json={**_PATTERN_PAYLOAD, "pattern_name": "xyzzy-pattern-probe"})
+    resp = test_app.get("/growth/search?q=xyzzy-pattern-probe&agent_id=cypher")
+    results = resp.json()["results"]
+    assert any(r["source_table"] == "growth_patterns" for r in results)
+
+
+async def test_search_finds_marker_title(test_app):
+    test_app.post("/growth/markers", json={**_MARKER_PAYLOAD, "title": "plugh-marker-probe complete"})
+    resp = test_app.get("/growth/search?q=plugh-marker-probe&agent_id=cypher")
+    results = resp.json()["results"]
+    assert any(r["source_table"] == "growth_markers" for r in results)
+
+
+async def test_search_scoped_by_agent(test_app):
+    """Search with agent_id only returns that agent's records."""
+    test_app.post("/growth/journal", json={**_JOURNAL_PAYLOAD, "content": "scoped-search-term agent cypher"})
+    test_app.post("/growth/journal", json={
+        **_JOURNAL_PAYLOAD,
+        "agent_id": "drevan",
+        "content": "scoped-search-term agent drevan",
+    })
+    resp = test_app.get("/growth/search?q=scoped-search-term&agent_id=cypher")
+    results = resp.json()["results"]
+    assert all(r["agent_id"] == "cypher" for r in results)
+
+
+async def test_search_empty_results(test_app):
+    resp = test_app.get("/growth/search?q=zzz-absolutely-nothing-matches-this&agent_id=cypher")
+    assert resp.status_code == 200
+    assert resp.json()["results"] == []
+
+
+async def test_search_multi_keyword_and_semantics(test_app):
+    """Multi-word query uses AND: both words must appear in the same record."""
+    test_app.post("/growth/journal", json={
+        **_JOURNAL_PAYLOAD,
+        "content": "alpha present but not the second word",
+    })
+    test_app.post("/growth/journal", json={
+        **_JOURNAL_PAYLOAD,
+        "content": "alpha and beta both present here",
+    })
+    resp = test_app.get("/growth/search?q=alpha beta&agent_id=cypher")
+    results = resp.json()["results"]
+    # Only the entry with both words should match
+    assert len(results) == 1
+    assert "alpha" in results[0]["content_snippet"]
+    assert "beta" in results[0]["content_snippet"]
+

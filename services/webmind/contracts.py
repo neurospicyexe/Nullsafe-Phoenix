@@ -579,3 +579,116 @@ class AutonomyRunDetailResponse(BaseModel):
     logs: List[AutonomyRunLogRecord] = Field(default_factory=list)
     reflections: List[AutonomyReflectionRecord] = Field(default_factory=list)
 
+
+# ---------------------------------------------------------------------------
+# Slice 6: Growth Layer
+# ---------------------------------------------------------------------------
+
+GrowthEntryType = Literal["observation", "insight", "milestone", "pattern", "reflection"]
+GrowthMarkerType = Literal["shift", "threshold", "milestone", "commitment"]
+GrowthConfidence = Literal["low", "normal", "high"]
+
+
+class GrowthJournalWriteRequest(BaseModel):
+    """Write a growth journal entry. Salience determines retention priority under the 200/agent cap."""
+    agent_id: AgentId
+    entry_type: GrowthEntryType
+    content: str = Field(..., min_length=1)
+    salience: Salience = "normal"
+    tags: List[str] = Field(default_factory=list)
+    metadata: WriteMetadata
+
+
+class GrowthJournalRecord(BaseModel):
+    """Stored growth journal entry."""
+    entry_id: str
+    agent_id: AgentId
+    entry_type: GrowthEntryType
+    content: str
+    salience: Salience
+    source: SourceType
+    tags: List[str]
+    actor: ActorType
+    created_at: str
+
+
+class GrowthPatternWriteRequest(BaseModel):
+    """Record a growth pattern. Confidence determines retention priority under the 50/agent cap."""
+    agent_id: AgentId
+    pattern_name: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(..., min_length=1)
+    supporting_evidence: List[str] = Field(default_factory=list)
+    confidence: GrowthConfidence = "normal"
+    first_observed_at: str = Field(..., description="ISO 8601 datetime")
+    recurrence_count: int = Field(1, ge=1)
+    metadata: WriteMetadata
+
+    @field_validator("first_observed_at")
+    @classmethod
+    def validate_first_observed_at(cls, v: str) -> str:
+        datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return v
+
+
+class GrowthPatternRecord(BaseModel):
+    """Stored growth pattern."""
+    pattern_id: str
+    agent_id: AgentId
+    pattern_name: str
+    description: str
+    supporting_evidence: List[str]
+    confidence: GrowthConfidence
+    first_observed_at: str
+    recurrence_count: int
+    source: SourceType
+    actor: ActorType
+    created_at: str
+    updated_at: str
+
+
+class GrowthMarkerWriteRequest(BaseModel):
+    """Plant a growth marker (shift, threshold, milestone, commitment)."""
+    agent_id: AgentId
+    marker_type: GrowthMarkerType
+    title: str = Field(..., min_length=1, max_length=200)
+    context: Optional[str] = None
+    related_thread_key: Optional[str] = None
+    metadata: WriteMetadata
+
+
+class GrowthMarkerRecord(BaseModel):
+    """Stored growth marker."""
+    marker_id: str
+    agent_id: AgentId
+    marker_type: GrowthMarkerType
+    title: str
+    context: Optional[str] = None
+    related_thread_key: Optional[str] = None
+    actor: ActorType
+    source: SourceType
+    created_at: str
+
+
+class HousekeepingResponse(BaseModel):
+    """Result of the growth housekeeping TTL cleanup run."""
+    pruned: Dict[str, int]
+    ran_at: str
+
+
+class GrowthSearchResult(BaseModel):
+    """Single hit from the growth keyword search."""
+    source_table: str
+    record_id: str
+    agent_id: str
+    title_or_name: Optional[str] = None
+    content_snippet: str
+    created_at: str
+
+
+class GrowthSearchResponse(BaseModel):
+    """Keyword search results across growth tables."""
+    query: str
+    agent_id: Optional[AgentId] = None
+    results: List[GrowthSearchResult]
+    total: int
+
