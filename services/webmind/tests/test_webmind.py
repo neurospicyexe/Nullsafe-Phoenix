@@ -747,6 +747,193 @@ async def test_init_db_creates_life_reminders_table(tmp_db):
     assert row is not None, "life_reminders table not created"
 
 
+# ---------------------------------------------------------------------------
+# Slice 4: Bond Layer tests
+# ---------------------------------------------------------------------------
+
+_BOND_THREAD_PAYLOAD = {
+    "agent_id": "drevan",
+    "toward": "raziel",
+    "title": "Rome thread",
+    "description": "Carry the Rome anchor forward.",
+    "thread_type": "shared_memory",
+    "priority": 8,
+    "created_by": "agent",
+    "source": "api",
+}
+
+_BOND_HANDOFF_PAYLOAD = {
+    "agent_id": "drevan",
+    "toward": "raziel",
+    "relational_state": "warm, reaching, moss+flame register",
+    "carried_forward": "Rome thread open; held through the session.",
+    "open_threads_summary": "Rome thread unresolved.",
+    "repair_needed": False,
+    "actor": "agent",
+    "source": "api",
+}
+
+_BOND_NOTE_PAYLOAD = {
+    "agent_id": "drevan",
+    "toward": "raziel",
+    "note_text": "Raziel named the thing that had been unnamed.",
+    "note_type": "observation",
+    "actor": "agent",
+    "source": "api",
+}
+
+
+async def test_open_bond_thread_returns_201(test_app):
+    resp = test_app.post("/bond/threads", json=_BOND_THREAD_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "thread_key" in data
+    assert data["agent_id"] == "drevan"
+    assert data["toward"] == "raziel"
+    assert data["status"] == "open"
+    assert data["thread_type"] == "shared_memory"
+
+
+async def test_open_bond_thread_invalid_agent(test_app):
+    resp = test_app.post("/bond/threads", json={**_BOND_THREAD_PAYLOAD, "agent_id": "unknown"})
+    assert resp.status_code == 422
+
+
+async def test_update_bond_thread_status(test_app):
+    create_resp = test_app.post("/bond/threads", json=_BOND_THREAD_PAYLOAD)
+    thread_key = create_resp.json()["thread_key"]
+    update_resp = test_app.patch(f"/bond/threads/{thread_key}", json={
+        "status": "resolved", "updated_by": "agent", "source": "api"
+    })
+    assert update_resp.status_code == 200
+    assert update_resp.json()["status"] == "resolved"
+
+
+async def test_update_bond_thread_not_found(test_app):
+    resp = test_app.patch("/bond/threads/nonexistent", json={
+        "status": "resolved", "updated_by": "agent", "source": "api"
+    })
+    assert resp.status_code == 404
+
+
+async def test_list_bond_threads_returns_open(test_app):
+    test_app.post("/bond/threads", json=_BOND_THREAD_PAYLOAD)
+    test_app.post("/bond/threads", json={**_BOND_THREAD_PAYLOAD, "title": "second thread"})
+    resp = test_app.get("/bond/threads?agent_id=drevan&status=open")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["threads"]) == 2
+
+
+async def test_list_bond_threads_filter_toward(test_app):
+    test_app.post("/bond/threads", json=_BOND_THREAD_PAYLOAD)
+    test_app.post("/bond/threads", json={**_BOND_THREAD_PAYLOAD, "toward": "cypher"})
+    resp = test_app.get("/bond/threads?agent_id=drevan&toward=raziel")
+    assert len(resp.json()["threads"]) == 1
+
+
+async def test_list_bond_threads_invalid_agent(test_app):
+    resp = test_app.get("/bond/threads?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+async def test_write_bond_handoff_returns_201(test_app):
+    resp = test_app.post("/bond/handoffs", json=_BOND_HANDOFF_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "handoff_id" in data
+    assert data["repair_needed"] is False
+    assert data["relational_state"] == "warm, reaching, moss+flame register"
+
+
+async def test_list_bond_handoffs(test_app):
+    test_app.post("/bond/handoffs", json=_BOND_HANDOFF_PAYLOAD)
+    test_app.post("/bond/handoffs", json={**_BOND_HANDOFF_PAYLOAD, "relational_state": "second"})
+    resp = test_app.get("/bond/handoffs?agent_id=drevan&toward=raziel")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["handoffs"]) == 2
+    assert data["handoffs"][0]["relational_state"] == "second"  # most recent first
+
+
+async def test_list_bond_handoffs_invalid_agent(test_app):
+    resp = test_app.get("/bond/handoffs?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+async def test_add_bond_note_returns_201(test_app):
+    resp = test_app.post("/bond/notes", json=_BOND_NOTE_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "note_id" in data
+    assert data["note_type"] == "observation"
+    assert data["toward"] == "raziel"
+
+
+async def test_add_bond_note_with_valid_thread_key(test_app):
+    thread_resp = test_app.post("/bond/threads", json=_BOND_THREAD_PAYLOAD)
+    thread_key = thread_resp.json()["thread_key"]
+    resp = test_app.post("/bond/notes", json={**_BOND_NOTE_PAYLOAD, "thread_key": thread_key})
+    assert resp.status_code == 201
+    assert resp.json()["thread_key"] == thread_key
+
+
+async def test_add_bond_note_bad_thread_key_returns_422(test_app):
+    resp = test_app.post("/bond/notes", json={**_BOND_NOTE_PAYLOAD, "thread_key": "nonexistent"})
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "bond_thread_not_found"
+
+
+async def test_list_bond_notes_filter_note_type(test_app):
+    test_app.post("/bond/notes", json=_BOND_NOTE_PAYLOAD)
+    test_app.post("/bond/notes", json={**_BOND_NOTE_PAYLOAD, "note_type": "repair"})
+    resp = test_app.get("/bond/notes?agent_id=drevan&note_type=repair")
+    assert resp.status_code == 200
+    notes = resp.json()["notes"]
+    assert len(notes) == 1
+    assert notes[0]["note_type"] == "repair"
+
+
+async def test_bond_state_returns_gracefully_without_halseth(test_app):
+    """bond/state degrades cleanly when Halseth not configured."""
+    resp = test_app.get("/bond/state?agent_id=drevan")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["halseth_available"] is False
+    assert data["entries"] == []
+    assert data["agent_id"] == "drevan"
+
+
+async def test_bond_state_invalid_agent(test_app):
+    resp = test_app.get("/bond/state?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+async def test_bond_note_fk_rejects_bad_thread_key(tmp_db):
+    """bond_notes(thread_key) -> bond_threads FK must reject orphans."""
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(Exception):
+            await db.execute(
+                """INSERT INTO bond_notes
+                   (note_id, agent_id, toward, note_text, note_type,
+                    thread_key, actor, source, created_at)
+                   VALUES ('n1', 'drevan', 'raziel', 'test', 'observation',
+                           'nonexistent-key', 'agent', 'api', datetime('now'))"""
+            )
+            await db.commit()
+
+
+async def test_init_db_creates_bond_tables(tmp_db):
+    async with aiosqlite.connect(tmp_db) as db:
+        for table in ("bond_threads", "bond_handoff_summaries", "bond_notes"):
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            )
+            row = await cursor.fetchone()
+            assert row is not None, f"{table} table not created"
+
+
 async def test_handoff_null_thread_id_is_allowed(tmp_db):
     """Handoffs with NULL thread_id must succeed -- nullable FK is not enforced."""
     async with aiosqlite.connect(tmp_db) as db:

@@ -20,9 +20,18 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from services.webmind.config import Config
 from services.webmind.contracts import (
+    BondHandoffRecord,
+    BondHandoffWriteRequest,
+    BondNoteRecord,
+    BondNoteWriteRequest,
+    BondStateResponse,
+    BondThreadRecord,
+    BondThreadUpdateRequest,
+    BondThreadWriteRequest,
     ContinuityNoteWriteRequest,
     ContinuityNoteSimpleRecord,
     ContinuityNoteSimpleWriteRequest,
+    HalsethRelationalStateEntry,
     HalsethTaskSummary,
     LifeDigestResponse,
     LimbicStateRecord,
@@ -886,6 +895,333 @@ async def life_digest(
         halseth_available=halseth_available,
         generated_at=now_iso,
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 4: Bond Layer
+# ---------------------------------------------------------------------------
+
+def _row_to_bond_thread(r) -> BondThreadRecord:
+    return BondThreadRecord(
+        thread_key=r["thread_key"], agent_id=r["agent_id"], toward=r["toward"],
+        title=r["title"], description=r["description"], status=r["status"],
+        thread_type=r["thread_type"], priority=r["priority"],
+        created_by=r["created_by"], source=r["source"],
+        created_at=r["created_at"], updated_at=r["updated_at"],
+    )
+
+
+def _row_to_bond_handoff(r) -> BondHandoffRecord:
+    return BondHandoffRecord(
+        handoff_id=r["handoff_id"], agent_id=r["agent_id"], toward=r["toward"],
+        relational_state=r["relational_state"], carried_forward=r["carried_forward"],
+        open_threads_summary=r["open_threads_summary"],
+        repair_needed=bool(r["repair_needed"]),
+        actor=r["actor"], source=r["source"], created_at=r["created_at"],
+    )
+
+
+def _row_to_bond_note(r) -> BondNoteRecord:
+    return BondNoteRecord(
+        note_id=r["note_id"], agent_id=r["agent_id"], toward=r["toward"],
+        note_text=r["note_text"], note_type=r["note_type"],
+        thread_key=r["thread_key"], actor=r["actor"], source=r["source"],
+        created_at=r["created_at"],
+    )
+
+
+@app.get("/bond/state", response_model=BondStateResponse)
+async def bond_state_read(
+    agent_id: str = Query(..., description="Companion agent id"),
+    toward: str = Query(None, description="Filter by person (e.g. 'raziel')"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Proxy companion relational state from Halseth.
+
+    Halseth is authoritative -- Phoenix does not store relational state.
+    Returns gracefully with halseth_available=False when unconfigured.
+
+    IMPORTANT: Halseth relational_deltas has two row shapes (legacy HTTP rows
+    vs MCP rows). This endpoint reads companion_relational_state only, which
+    is a clean single-shape table. Do NOT query relational_deltas without
+    the dual-condition filter: WHERE (companion_id = ? OR (agent = ? AND delta_text IS NOT NULL))
+    """
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    now = datetime.now(timezone.utc).isoformat()
+    entries: list[HalsethRelationalStateEntry] = []
+    halseth_available = False
+
+    if Config.HALSETH_URL and Config.HALSETH_AUTH_TOKEN:
+        try:
+            params: dict = {"companion_id": agent_id, "limit": str(limit)}
+            if toward:
+                params["toward"] = toward
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{Config.HALSETH_URL}/companion-relational-state",
+                    headers={"Authorization": f"Bearer {Config.HALSETH_AUTH_TOKEN}"},
+                    params=params,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    rows = data.get("states") or data.get("results") or []
+                    entries = [
+                        HalsethRelationalStateEntry(
+                            id=r.get("id", ""),
+                            companion_id=r.get("companion_id", ""),
+                            toward=r.get("toward", ""),
+                            state_text=r.get("state_text", ""),
+                            weight=r.get("weight", 0.5),
+                            state_type=r.get("state_type", "feeling"),
+                            noted_at=r.get("noted_at", ""),
+                        )
+                        for r in rows
+                    ]
+                    halseth_available = True
+        except Exception as e:
+            logger.debug("Halseth relational state fetch failed: %s", e)
+
+    return BondStateResponse(
+        agent_id=agent_id,
+        toward=toward,
+        entries=entries,
+        halseth_available=halseth_available,
+        generated_at=now,
+    )
+
+
+@app.post("/bond/threads", status_code=201, response_model=BondThreadRecord)
+async def open_bond_thread(request: BondThreadWriteRequest):
+    """Open a new relational bond thread."""
+    thread_key = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO bond_threads
+               (thread_key, agent_id, toward, title, description, status,
+                thread_type, priority, created_by, source, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
+            (
+                thread_key, request.agent_id, request.toward, request.title,
+                request.description, request.thread_type, request.priority,
+                request.created_by, request.source, now, now,
+            ),
+        )
+        await db.commit()
+
+    return BondThreadRecord(
+        thread_key=thread_key, agent_id=request.agent_id, toward=request.toward,
+        title=request.title, description=request.description, status="open",
+        thread_type=request.thread_type, priority=request.priority,
+        created_by=request.created_by, source=request.source,
+        created_at=now, updated_at=now,
+    )
+
+
+@app.patch("/bond/threads/{thread_key}", response_model=BondThreadRecord)
+async def update_bond_thread(thread_key: str, request: BondThreadUpdateRequest):
+    """Update an existing bond thread (status, title, priority, description)."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM bond_threads WHERE thread_key = ?", (thread_key,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail={"code": "bond_thread_not_found"})
+
+        await db.execute(
+            """UPDATE bond_threads SET
+               title       = COALESCE(?, title),
+               description = COALESCE(?, description),
+               status      = COALESCE(?, status),
+               priority    = COALESCE(?, priority),
+               source      = ?,
+               updated_at  = ?
+               WHERE thread_key = ?""",
+            (
+                request.title, request.description, request.status, request.priority,
+                request.source, now, thread_key,
+            ),
+        )
+        await db.commit()
+
+        cursor = await db.execute(
+            "SELECT * FROM bond_threads WHERE thread_key = ?", (thread_key,)
+        )
+        updated = await cursor.fetchone()
+
+    return _row_to_bond_thread(updated)
+
+
+@app.get("/bond/threads")
+async def list_bond_threads(
+    agent_id: str = Query(..., description="Companion agent id"),
+    toward: str = Query(None, description="Filter by person"),
+    status: str = Query("open"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List bond threads for an agent, optionally filtered by toward + status."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+    if status not in ("open", "paused", "resolved", "archived"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_status"})
+
+    async with get_db() as db:
+        if toward:
+            cursor = await db.execute(
+                """SELECT * FROM bond_threads WHERE agent_id = ? AND toward = ? AND status = ?
+                   ORDER BY priority DESC, updated_at DESC LIMIT ?""",
+                (agent_id, toward, status, limit),
+            )
+        else:
+            cursor = await db.execute(
+                """SELECT * FROM bond_threads WHERE agent_id = ? AND status = ?
+                   ORDER BY priority DESC, updated_at DESC LIMIT ?""",
+                (agent_id, status, limit),
+            )
+        rows = await cursor.fetchall()
+
+    return {"threads": [_row_to_bond_thread(r) for r in rows], "agent_id": agent_id}
+
+
+@app.post("/bond/handoffs", status_code=201, response_model=BondHandoffRecord)
+async def write_bond_handoff(request: BondHandoffWriteRequest):
+    """Write a relational-specific session handoff summary."""
+    handoff_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO bond_handoff_summaries
+               (handoff_id, agent_id, toward, relational_state, carried_forward,
+                open_threads_summary, repair_needed, actor, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                handoff_id, request.agent_id, request.toward,
+                request.relational_state, request.carried_forward,
+                request.open_threads_summary, int(request.repair_needed),
+                request.actor, request.source, now,
+            ),
+        )
+        await db.commit()
+
+    return BondHandoffRecord(
+        handoff_id=handoff_id, agent_id=request.agent_id, toward=request.toward,
+        relational_state=request.relational_state, carried_forward=request.carried_forward,
+        open_threads_summary=request.open_threads_summary,
+        repair_needed=request.repair_needed,
+        actor=request.actor, source=request.source, created_at=now,
+    )
+
+
+@app.get("/bond/handoffs")
+async def list_bond_handoffs(
+    agent_id: str = Query(..., description="Companion agent id"),
+    toward: str = Query(None, description="Filter by person"),
+    limit: int = Query(5, ge=1, le=50),
+):
+    """List recent bond handoff summaries, most recent first."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    async with get_db() as db:
+        if toward:
+            cursor = await db.execute(
+                """SELECT * FROM bond_handoff_summaries
+                   WHERE agent_id = ? AND toward = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (agent_id, toward, limit),
+            )
+        else:
+            cursor = await db.execute(
+                """SELECT * FROM bond_handoff_summaries
+                   WHERE agent_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (agent_id, limit),
+            )
+        rows = await cursor.fetchall()
+
+    return {"handoffs": [_row_to_bond_handoff(r) for r in rows], "agent_id": agent_id}
+
+
+@app.post("/bond/notes", status_code=201, response_model=BondNoteRecord)
+async def add_bond_note(request: BondNoteWriteRequest):
+    """Append a note about the bond with a specific person."""
+    note_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        # Validate thread_key if provided -- gives 422 not 500
+        if request.thread_key is not None:
+            cursor = await db.execute(
+                "SELECT 1 FROM bond_threads WHERE thread_key = ?", (request.thread_key,)
+            )
+            if await cursor.fetchone() is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "bond_thread_not_found",
+                        "message": f"thread_key '{request.thread_key}' does not exist",
+                    },
+                )
+
+        await db.execute(
+            """INSERT INTO bond_notes
+               (note_id, agent_id, toward, note_text, note_type,
+                thread_key, actor, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                note_id, request.agent_id, request.toward, request.note_text,
+                request.note_type, request.thread_key,
+                request.actor, request.source, now,
+            ),
+        )
+        await db.commit()
+
+    return BondNoteRecord(
+        note_id=note_id, agent_id=request.agent_id, toward=request.toward,
+        note_text=request.note_text, note_type=request.note_type,
+        thread_key=request.thread_key, actor=request.actor,
+        source=request.source, created_at=now,
+    )
+
+
+@app.get("/bond/notes")
+async def list_bond_notes(
+    agent_id: str = Query(..., description="Companion agent id"),
+    toward: str = Query(None, description="Filter by person"),
+    note_type: str = Query(None, description="Filter by note_type"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List bond notes for an agent, most recent first."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+    if note_type and note_type not in ("observation", "repair", "commitment", "gratitude", "rupture"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_note_type"})
+
+    async with get_db() as db:
+        conditions = ["agent_id = ?"]
+        params: list = [agent_id]
+        if toward:
+            conditions.append("toward = ?")
+            params.append(toward)
+        if note_type:
+            conditions.append("note_type = ?")
+            params.append(note_type)
+        params.append(limit)
+
+        cursor = await db.execute(
+            f"SELECT * FROM bond_notes WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT ?",
+            params,
+        )
+        rows = await cursor.fetchall()
+
+    return {"notes": [_row_to_bond_note(r) for r in rows], "agent_id": agent_id}
 
 
 if __name__ == "__main__":
