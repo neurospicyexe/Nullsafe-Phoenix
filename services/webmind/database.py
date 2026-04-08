@@ -227,6 +227,140 @@ CREATE INDEX IF NOT EXISTS idx_bond_notes_agent_toward
 ON bond_notes (agent_id, toward, created_at DESC);
 """
 
+# ---------------------------------------------------------------------------
+# Slice 5: Autonomy v0
+# ---------------------------------------------------------------------------
+
+_CREATE_AUTONOMY_SCHEDULES = """
+CREATE TABLE IF NOT EXISTS autonomy_schedules (
+    schedule_id          TEXT PRIMARY KEY,
+    agent_id             TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    frequency            TEXT NOT NULL DEFAULT 'every_6h'
+                             CHECK (frequency IN ('every_4h', 'every_6h', 'every_8h', 'every_12h', 'daily')),
+    max_explore_calls    INTEGER NOT NULL DEFAULT 10
+                             CHECK (max_explore_calls >= 1 AND max_explore_calls <= 50),
+    max_synthesize_calls INTEGER NOT NULL DEFAULT 3
+                             CHECK (max_synthesize_calls >= 1 AND max_synthesize_calls <= 5),
+    quiet_hours_start    TEXT,
+    quiet_hours_end      TEXT,
+    allowed_actions      TEXT NOT NULL DEFAULT '["search","read","inference"]',
+    actor                TEXT NOT NULL,
+    source               TEXT NOT NULL,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (agent_id)
+);
+"""
+
+_CREATE_AUTONOMY_SEEDS = """
+CREATE TABLE IF NOT EXISTS autonomy_seeds (
+    seed_id    TEXT PRIMARY KEY,
+    agent_id   TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    seed_type  TEXT NOT NULL
+                   CHECK (seed_type IN ('interest', 'curiosity', 'thread', 'dream', 'planted')),
+    title      TEXT NOT NULL,
+    description TEXT,
+    source_ref  TEXT,
+    status     TEXT NOT NULL DEFAULT 'available'
+                   CHECK (status IN ('available', 'used', 'expired', 'dismissed')),
+    planted_by TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_SEEDS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_seeds_agent_status
+ON autonomy_seeds (agent_id, status, created_at DESC);
+"""
+
+_CREATE_AUTONOMY_RUNS = """
+CREATE TABLE IF NOT EXISTS autonomy_runs (
+    run_id            TEXT PRIMARY KEY,
+    agent_id          TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    seed_id           TEXT,
+    phase             TEXT NOT NULL DEFAULT 'explore'
+                          CHECK (phase IN ('explore', 'synthesize')),
+    status            TEXT NOT NULL DEFAULT 'exploring'
+                          CHECK (status IN ('exploring', 'synthesizing', 'completed', 'failed', 'cancelled')),
+    explore_model     TEXT,
+    synthesize_model  TEXT,
+    explore_calls     INTEGER NOT NULL DEFAULT 0,
+    synthesize_calls  INTEGER NOT NULL DEFAULT 0,
+    max_explore_calls INTEGER NOT NULL DEFAULT 10,
+    seed_title        TEXT,
+    error_message     TEXT,
+    actor             TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    correlation_id    TEXT,
+    started_at        TEXT NOT NULL,
+    phase_changed_at  TEXT,
+    completed_at      TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (seed_id) REFERENCES autonomy_seeds (seed_id) ON DELETE SET NULL
+);
+"""
+
+_CREATE_RUNS_AGENT_STATUS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_runs_agent_status
+ON autonomy_runs (agent_id, status, started_at DESC);
+"""
+
+_CREATE_RUNS_AGENT_CREATED_IDX = """
+CREATE INDEX IF NOT EXISTS idx_runs_agent_created
+ON autonomy_runs (agent_id, created_at DESC);
+"""
+
+_CREATE_AUTONOMY_RUN_LOGS = """
+CREATE TABLE IF NOT EXISTS autonomy_run_logs (
+    log_id      TEXT PRIMARY KEY,
+    run_id      TEXT NOT NULL,
+    agent_id    TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    entry_type  TEXT NOT NULL
+                    CHECK (entry_type IN ('search', 'read', 'inference', 'discovery', 'note', 'error')),
+    content     TEXT NOT NULL,
+    model_used  TEXT,
+    token_count INTEGER,
+    step_index  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (run_id) REFERENCES autonomy_runs (run_id) ON DELETE CASCADE
+);
+"""
+
+_CREATE_RUN_LOGS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_run_logs_run
+ON autonomy_run_logs (run_id, step_index);
+"""
+
+_CREATE_AUTONOMY_REFLECTIONS = """
+CREATE TABLE IF NOT EXISTS autonomy_reflections (
+    reflection_id   TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    agent_id        TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    reflection_type TEXT NOT NULL
+                        CHECK (reflection_type IN ('insight', 'journal', 'thread_update', 'continuity_note', 'discovery')),
+    title           TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    model_used      TEXT,
+    target_ref      TEXT,
+    actor           TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (run_id) REFERENCES autonomy_runs (run_id) ON DELETE CASCADE
+);
+"""
+
+_CREATE_REFLECTIONS_RUN_IDX = """
+CREATE INDEX IF NOT EXISTS idx_reflections_run
+ON autonomy_reflections (run_id, created_at);
+"""
+
+_CREATE_REFLECTIONS_AGENT_IDX = """
+CREATE INDEX IF NOT EXISTS idx_reflections_agent
+ON autonomy_reflections (agent_id, created_at DESC);
+"""
+
 
 async def init_db() -> None:
     """Create tables and indexes if they do not exist.
@@ -263,6 +397,18 @@ async def init_db() -> None:
         await db.execute(_CREATE_BOND_HANDOFFS_IDX)
         await db.execute(_CREATE_BOND_NOTES)
         await db.execute(_CREATE_BOND_NOTES_IDX)
+        # Slice 5: Autonomy v0 -- seeds before runs (FK), runs before logs/reflections (FK)
+        await db.execute(_CREATE_AUTONOMY_SCHEDULES)
+        await db.execute(_CREATE_AUTONOMY_SEEDS)
+        await db.execute(_CREATE_SEEDS_IDX)
+        await db.execute(_CREATE_AUTONOMY_RUNS)
+        await db.execute(_CREATE_RUNS_AGENT_STATUS_IDX)
+        await db.execute(_CREATE_RUNS_AGENT_CREATED_IDX)
+        await db.execute(_CREATE_AUTONOMY_RUN_LOGS)
+        await db.execute(_CREATE_RUN_LOGS_IDX)
+        await db.execute(_CREATE_AUTONOMY_REFLECTIONS)
+        await db.execute(_CREATE_REFLECTIONS_RUN_IDX)
+        await db.execute(_CREATE_REFLECTIONS_AGENT_IDX)
         await db.commit()
 
 

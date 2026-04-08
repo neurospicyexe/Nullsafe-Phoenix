@@ -1,11 +1,11 @@
 """
 Pydantic contracts for WebMind v0 scaffold.
 
-These models lock names and shapes for Slice 2 work:
-- continuity reads (mind_orient / mind_ground)
-- session handoffs
-- mind threads
-- continuity notes
+These models lock names and shapes across slices:
+- Slice 2: continuity reads (mind_orient / mind_ground), session handoffs, mind threads
+- Slice 3: life reminders + housekeeping digest
+- Slice 4: bond layer (bond_threads, bond_handoffs, bond_notes, bond_state proxy)
+- Slice 5: autonomy v0 (schedules, seeds, runs, logs, reflections)
 """
 
 from datetime import datetime
@@ -406,4 +406,162 @@ class MindGroundResponse(BaseModel):
     recent_handoffs: List[SessionHandoffRecord] = Field(default_factory=list)
     recent_notes: List[ContinuityNoteSimpleRecord] = Field(default_factory=list)
     generated_at: str
+
+
+# ---------------------------------------------------------------------------
+# Slice 5: Autonomy v0
+# ---------------------------------------------------------------------------
+
+SeedType = Literal["interest", "curiosity", "thread", "dream", "planted"]
+SeedStatus = Literal["available", "used", "expired", "dismissed"]
+RunStatus = Literal["exploring", "synthesizing", "completed", "failed", "cancelled"]
+RunPhase = Literal["explore", "synthesize"]
+LogEntryType = Literal["search", "read", "inference", "discovery", "note", "error"]
+ReflectionType = Literal["insight", "journal", "thread_update", "continuity_note", "discovery"]
+ScheduleFrequency = Literal["every_4h", "every_6h", "every_8h", "every_12h", "daily"]
+
+
+class AutonomyScheduleWriteRequest(BaseModel):
+    """Create/update an autonomy schedule for a companion. One per companion (upsert)."""
+    agent_id: AgentId
+    enabled: bool = True
+    frequency: ScheduleFrequency = "every_6h"
+    max_explore_calls: int = Field(10, ge=1, le=50)
+    max_synthesize_calls: int = Field(3, ge=1, le=5)
+    quiet_hours_start: Optional[str] = None  # HH:MM UTC
+    quiet_hours_end: Optional[str] = None    # HH:MM UTC
+    allowed_actions: List[str] = Field(default_factory=lambda: ["search", "read", "inference"])
+    metadata: WriteMetadata
+
+
+class AutonomyScheduleRecord(BaseModel):
+    """Stored autonomy schedule."""
+    schedule_id: str
+    agent_id: AgentId
+    enabled: bool
+    frequency: ScheduleFrequency
+    max_explore_calls: int
+    max_synthesize_calls: int
+    quiet_hours_start: Optional[str] = None
+    quiet_hours_end: Optional[str] = None
+    allowed_actions: List[str]
+    actor: ActorType
+    source: SourceType
+    created_at: str
+    updated_at: str
+
+
+class AutonomySeedWriteRequest(BaseModel):
+    """Plant or record an autonomy seed (interest, curiosity, dream, or Raziel-planted topic)."""
+    agent_id: AgentId
+    seed_type: SeedType
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    source_ref: Optional[str] = None  # soft ref: thread_key, dream_id, vault doc, etc.
+    metadata: WriteMetadata
+
+
+class AutonomySeedRecord(BaseModel):
+    """Stored autonomy seed."""
+    seed_id: str
+    agent_id: AgentId
+    seed_type: SeedType
+    title: str
+    description: Optional[str] = None
+    source_ref: Optional[str] = None
+    status: SeedStatus
+    planted_by: ActorType
+    source: SourceType
+    created_at: str
+
+
+class AutonomyRunStartRequest(BaseModel):
+    """Begin an autonomous run."""
+    agent_id: AgentId
+    seed_id: Optional[str] = None
+    seed_title: Optional[str] = Field(None, max_length=200)  # used when no seed_id
+    explore_model: Optional[str] = Field(None, max_length=100)  # e.g. "deepseek-v3"
+    max_explore_calls: int = Field(10, ge=1, le=50)
+    metadata: WriteMetadata
+
+
+class AutonomyRunRecord(BaseModel):
+    """Stored/retrieved autonomous run record."""
+    run_id: str
+    agent_id: AgentId
+    seed_id: Optional[str] = None
+    phase: RunPhase
+    status: RunStatus
+    explore_model: Optional[str] = None
+    synthesize_model: Optional[str] = None
+    explore_calls: int
+    synthesize_calls: int
+    max_explore_calls: int
+    seed_title: Optional[str] = None
+    error_message: Optional[str] = None
+    actor: ActorType
+    source: SourceType
+    correlation_id: Optional[str] = None
+    started_at: str
+    phase_changed_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    created_at: str
+
+
+class AutonomyRunLogRequest(BaseModel):
+    """Append a log entry during Phase 1 exploration."""
+    entry_type: LogEntryType
+    content: str = Field(..., min_length=1)
+    model_used: Optional[str] = Field(None, max_length=100)
+    token_count: Optional[int] = Field(None, ge=0)
+
+
+class AutonomyRunLogRecord(BaseModel):
+    """Stored exploration log entry."""
+    log_id: str
+    run_id: str
+    agent_id: AgentId
+    entry_type: LogEntryType
+    content: str
+    model_used: Optional[str] = None
+    token_count: Optional[int] = None
+    step_index: int
+    created_at: str
+
+
+class AutonomyRunReflectRequest(BaseModel):
+    """Write a Phase 2 synthesis reflection."""
+    reflection_type: ReflectionType
+    title: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1)
+    model_used: Optional[str] = Field(None, max_length=100)  # e.g. "claude-sonnet-4-20250514"
+    target_ref: Optional[str] = None  # soft ref to where synthesis was deposited
+
+
+class AutonomyReflectionRecord(BaseModel):
+    """Stored Phase 2 synthesis reflection."""
+    reflection_id: str
+    run_id: str
+    agent_id: AgentId
+    reflection_type: ReflectionType
+    title: str
+    content: str
+    model_used: Optional[str] = None
+    target_ref: Optional[str] = None
+    actor: ActorType
+    source: SourceType
+    created_at: str
+
+
+class AutonomyRunCompleteRequest(BaseModel):
+    """Mark a run as completed, failed, or cancelled."""
+    status: Literal["completed", "failed", "cancelled"]
+    error_message: Optional[str] = None
+
+
+class AutonomyRunDetailResponse(BaseModel):
+    """Full run detail: run record + exploration logs + synthesis reflections."""
+    run: AutonomyRunRecord
+    logs: List[AutonomyRunLogRecord] = Field(default_factory=list)
+    reflections: List[AutonomyReflectionRecord] = Field(default_factory=list)
 
