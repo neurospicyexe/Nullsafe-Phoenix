@@ -32,6 +32,15 @@ from services.webmind.contracts import (
     AutonomyScheduleWriteRequest,
     AutonomySeedRecord,
     AutonomySeedWriteRequest,
+    GrowthJournalRecord,
+    GrowthJournalWriteRequest,
+    GrowthMarkerRecord,
+    GrowthMarkerWriteRequest,
+    GrowthPatternRecord,
+    GrowthPatternWriteRequest,
+    GrowthSearchResponse,
+    GrowthSearchResult,
+    HousekeepingResponse,
     BondHandoffRecord,
     BondHandoffWriteRequest,
     BondNoteRecord,
@@ -103,7 +112,7 @@ async def verify_token(
 
 app = FastAPI(
     title="Nullsafe Phoenix WebMind",
-    version="v0-slice4",
+    version="v0-slice6",
     description="Persistent continuity and mind-state API (scaffold)",
     lifespan=lifespan,
     dependencies=[Depends(verify_token)],
@@ -117,7 +126,7 @@ async def health_check():
     return {
         "status": "ok",
         "service": "webmind",
-        "version": "v0-slice2-scaffold",
+        "version": "v0-slice6",
         "db_configured": True,
         "db_type": db_type,
         "halseth_configured": bool(Config.HALSETH_URL),
@@ -217,6 +226,9 @@ async def create_note(request: ContinuityNoteSimpleWriteRequest):
                VALUES (?, ?, ?, ?, ?, ?)""",
             (note_id, request.agent_id, request.thread_key, request.note_text, request.source, now),
         )
+        # 100/agent cap matching Halseth's wm_continuity_notes. INSERT + DELETE are
+        # in the same uncommitted transaction -- both roll back together on failure.
+        await _enforce_cap(db, "continuity_notes", "note_id", request.agent_id, 100)
         await db.commit()
 
     return ContinuityNoteSimpleRecord(
@@ -1254,6 +1266,95 @@ async def list_bond_notes(
 
 
 # ---------------------------------------------------------------------------
+# Retention helpers (used across Slices 5+6)
+# ---------------------------------------------------------------------------
+
+_ENFORCE_CAP_ALLOWED_TABLES = frozenset({
+    "growth_journal", "growth_patterns", "growth_markers", "continuity_notes"
+})
+_ENFORCE_CAP_ALLOWED_ID_COLS = frozenset({
+    "entry_id", "pattern_id", "marker_id", "note_id"
+})
+_ENFORCE_CAP_ALLOWED_SALIENCE_COLS = frozenset({"salience", "confidence"})
+
+
+async def _enforce_cap(
+    db,
+    table: str,
+    id_col: str,
+    agent_id: str,
+    cap: int,
+    salience_col: str | None = None,
+) -> int:
+    """Delete the oldest rows beyond the per-agent cap. Returns count deleted.
+
+    Must be called inside the same `async with get_db() as db:` block as the
+    INSERT, before db.commit(). The INSERT + DELETE form an atomic batch so
+    a failed commit rolls back both.
+
+    Salience-aware pruning (when salience_col is provided):
+    - LOW entries pruned first (oldest first)
+    - NORMAL entries pruned next (oldest first)
+    - HIGH entries are NEVER auto-pruned
+    - Cap counts only pruneable rows (LOW + NORMAL); HIGH entries are exempt
+    - HIGH entries accumulate without limit by design -- important insights
+      must never vanish silently. The cap is a floor guarantee for the
+      pruneable pool, not a hard ceiling on total rows per agent.
+
+    For tables without salience (salience_col=None), oldest row pruned unconditionally.
+    """
+    if table not in _ENFORCE_CAP_ALLOWED_TABLES:
+        raise ValueError(f"_enforce_cap: disallowed table '{table}'")
+    if id_col not in _ENFORCE_CAP_ALLOWED_ID_COLS:
+        raise ValueError(f"_enforce_cap: disallowed id_col '{id_col}'")
+    if salience_col is not None and salience_col not in _ENFORCE_CAP_ALLOWED_SALIENCE_COLS:
+        raise ValueError(f"_enforce_cap: disallowed salience_col '{salience_col}'")
+    if salience_col:
+        cursor = await db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE agent_id = ? AND {salience_col} != 'high'",
+            (agent_id,),
+        )
+    else:
+        cursor = await db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE agent_id = ?",
+            (agent_id,),
+        )
+    row = await cursor.fetchone()
+    count = row[0]
+
+    excess = count - cap
+    if excess <= 0:
+        return 0
+
+    if salience_col:
+        await db.execute(
+            f"""DELETE FROM {table}
+               WHERE {id_col} IN (
+                   SELECT {id_col} FROM {table}
+                   WHERE agent_id = ? AND {salience_col} != 'high'
+                   ORDER BY
+                       CASE {salience_col} WHEN 'low' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                       created_at ASC
+                   LIMIT ?
+               )""",
+            (agent_id, excess),
+        )
+    else:
+        await db.execute(
+            f"""DELETE FROM {table}
+               WHERE {id_col} IN (
+                   SELECT {id_col} FROM {table}
+                   WHERE agent_id = ?
+                   ORDER BY created_at ASC
+                   LIMIT ?
+               )""",
+            (agent_id, excess),
+        )
+
+    return excess
+
+
+# ---------------------------------------------------------------------------
 # Slice 5: Autonomy v0
 # ---------------------------------------------------------------------------
 
@@ -1686,6 +1787,336 @@ async def list_autonomy_runs(
         rows = await cursor.fetchall()
 
     return {"runs": [_row_to_run(r) for r in rows], "agent_id": agent_id}
+
+
+# ---------------------------------------------------------------------------
+# Slice 6: Growth Layer
+# ---------------------------------------------------------------------------
+
+def _row_to_growth_journal(row) -> GrowthJournalRecord:
+    return GrowthJournalRecord(
+        entry_id=row["entry_id"],
+        agent_id=row["agent_id"],
+        entry_type=row["entry_type"],
+        content=row["content"],
+        salience=row["salience"],
+        source=row["source"],
+        tags=json.loads(row["tags"]),
+        actor=row["actor"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_growth_pattern(row) -> GrowthPatternRecord:
+    return GrowthPatternRecord(
+        pattern_id=row["pattern_id"],
+        agent_id=row["agent_id"],
+        pattern_name=row["pattern_name"],
+        description=row["description"],
+        supporting_evidence=json.loads(row["supporting_evidence"]),
+        confidence=row["confidence"],
+        first_observed_at=row["first_observed_at"],
+        recurrence_count=row["recurrence_count"],
+        source=row["source"],
+        actor=row["actor"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_growth_marker(row) -> GrowthMarkerRecord:
+    return GrowthMarkerRecord(
+        marker_id=row["marker_id"],
+        agent_id=row["agent_id"],
+        marker_type=row["marker_type"],
+        title=row["title"],
+        context=row["context"],
+        related_thread_key=row["related_thread_key"],
+        actor=row["actor"],
+        source=row["source"],
+        created_at=row["created_at"],
+    )
+
+
+@app.post("/growth/journal", response_model=GrowthJournalRecord, status_code=201)
+async def write_growth_journal(request: GrowthJournalWriteRequest):
+    """Write a growth journal entry. Enforces 200/agent cap (LOW pruned first, HIGH never pruned)."""
+    now = datetime.now(timezone.utc).isoformat()
+    entry_id = str(uuid.uuid4())
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO growth_journal
+               (entry_id, agent_id, entry_type, content, salience, source, tags, actor, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                entry_id, request.agent_id, request.entry_type, request.content,
+                request.salience, request.metadata.source,
+                json.dumps(request.tags), request.metadata.actor, now,
+            ),
+        )
+        await _enforce_cap(db, "growth_journal", "entry_id", request.agent_id, 200, salience_col="salience")
+        await db.commit()
+        cursor = await db.execute("SELECT * FROM growth_journal WHERE entry_id = ?", (entry_id,))
+        row = await cursor.fetchone()
+
+    return _row_to_growth_journal(row)
+
+
+@app.get("/growth/journal")
+async def list_growth_journal(
+    agent_id: str = Query(...),
+    entry_type: str = Query(None),
+    exclude_sources: str = Query(None, description="Comma-separated sources to exclude (anti-feedback loop)"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List growth journal entries. Use exclude_sources to prevent synthesis feedback loops."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    valid_entry_types = ("observation", "insight", "milestone", "pattern", "reflection")
+    if entry_type and entry_type not in valid_entry_types:
+        raise HTTPException(status_code=422, detail={"code": "invalid_entry_type"})
+
+    conditions = ["agent_id = ?"]
+    params: list = [agent_id]
+
+    if entry_type:
+        conditions.append("entry_type = ?")
+        params.append(entry_type)
+
+    if exclude_sources:
+        excluded = [s.strip() for s in exclude_sources.split(",") if s.strip()]
+        placeholders = ",".join("?" for _ in excluded)
+        conditions.append(f"source NOT IN ({placeholders})")
+        params.extend(excluded)
+
+    params.append(limit)
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            f"SELECT * FROM growth_journal WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT ?",
+            params,
+        )
+        rows = await cursor.fetchall()
+
+    return {"entries": [_row_to_growth_journal(r) for r in rows], "agent_id": agent_id}
+
+
+@app.post("/growth/patterns", response_model=GrowthPatternRecord, status_code=201)
+async def write_growth_pattern(request: GrowthPatternWriteRequest):
+    """Record a growth pattern. Enforces 50/agent cap (LOW confidence pruned first)."""
+    now = datetime.now(timezone.utc).isoformat()
+    pattern_id = str(uuid.uuid4())
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO growth_patterns
+               (pattern_id, agent_id, pattern_name, description, supporting_evidence,
+                confidence, first_observed_at, recurrence_count, source, actor, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pattern_id, request.agent_id, request.pattern_name, request.description,
+                json.dumps(request.supporting_evidence), request.confidence,
+                request.first_observed_at, request.recurrence_count,
+                request.metadata.source, request.metadata.actor, now, now,
+            ),
+        )
+        await _enforce_cap(db, "growth_patterns", "pattern_id", request.agent_id, 50, salience_col="confidence")
+        await db.commit()
+        cursor = await db.execute("SELECT * FROM growth_patterns WHERE pattern_id = ?", (pattern_id,))
+        row = await cursor.fetchone()
+
+    return _row_to_growth_pattern(row)
+
+
+@app.get("/growth/patterns")
+async def list_growth_patterns(
+    agent_id: str = Query(...),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List growth patterns ordered by recurrence count (most recurring first)."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM growth_patterns WHERE agent_id = ? ORDER BY recurrence_count DESC, created_at DESC LIMIT ?",
+            (agent_id, limit),
+        )
+        rows = await cursor.fetchall()
+
+    return {"patterns": [_row_to_growth_pattern(r) for r in rows], "agent_id": agent_id}
+
+
+@app.post("/growth/markers", response_model=GrowthMarkerRecord, status_code=201)
+async def write_growth_marker(request: GrowthMarkerWriteRequest):
+    """Plant a growth marker. Enforces 100/agent cap (oldest pruned unconditionally)."""
+    now = datetime.now(timezone.utc).isoformat()
+    marker_id = str(uuid.uuid4())
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO growth_markers
+               (marker_id, agent_id, marker_type, title, context, related_thread_key,
+                actor, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                marker_id, request.agent_id, request.marker_type, request.title,
+                request.context, request.related_thread_key,
+                request.metadata.actor, request.metadata.source, now,
+            ),
+        )
+        await _enforce_cap(db, "growth_markers", "marker_id", request.agent_id, 100)
+        await db.commit()
+        cursor = await db.execute("SELECT * FROM growth_markers WHERE marker_id = ?", (marker_id,))
+        row = await cursor.fetchone()
+
+    return _row_to_growth_marker(row)
+
+
+@app.get("/growth/markers")
+async def list_growth_markers(
+    agent_id: str = Query(...),
+    marker_type: str = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List growth markers, optionally filtered by type."""
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    valid_types = ("shift", "threshold", "milestone", "commitment")
+    if marker_type and marker_type not in valid_types:
+        raise HTTPException(status_code=422, detail={"code": "invalid_marker_type"})
+
+    async with get_db() as db:
+        if marker_type:
+            cursor = await db.execute(
+                "SELECT * FROM growth_markers WHERE agent_id = ? AND marker_type = ? ORDER BY created_at DESC LIMIT ?",
+                (agent_id, marker_type, limit),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM growth_markers WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+                (agent_id, limit),
+            )
+        rows = await cursor.fetchall()
+
+    return {"markers": [_row_to_growth_marker(r) for r in rows], "agent_id": agent_id}
+
+
+@app.post("/growth/housekeeping", response_model=HousekeepingResponse)
+async def growth_housekeeping():
+    """Run 90-day TTL cleanup on autonomy_run_logs and mind_thread_events."""
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=90)).isoformat()
+    ran_at = now.isoformat()
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM autonomy_run_logs WHERE created_at < ?", (cutoff,)
+        )
+        pruned_run_logs = cursor.rowcount
+
+        cursor = await db.execute(
+            "DELETE FROM mind_thread_events WHERE created_at < ?", (cutoff,)
+        )
+        pruned_thread_events = cursor.rowcount
+
+        await db.commit()
+
+    return HousekeepingResponse(
+        pruned={
+            "autonomy_run_logs": pruned_run_logs,
+            "mind_thread_events": pruned_thread_events,
+        },
+        ran_at=ran_at,
+    )
+
+
+@app.get("/growth/search", response_model=GrowthSearchResponse)
+async def growth_search(
+    q: str = Query(..., min_length=1),
+    agent_id: str = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Keyword search across growth_journal, growth_patterns, and growth_markers."""
+    if agent_id and agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    # Multi-keyword AND: split on whitespace, each term must match somewhere
+    keywords = q.strip().split()
+    snippet_limit = 300
+
+    def make_like_conditions(col: str) -> tuple[str, list]:
+        """Return (AND clause, params) for all keywords on one column."""
+        clauses = " AND ".join(f"{col} LIKE ?" for _ in keywords)
+        params = [f"%{kw}%" for kw in keywords]
+        return clauses, params
+
+    results: list[GrowthSearchResult] = []
+
+    async with get_db() as db:
+        # --- growth_journal ---
+        content_clause, content_params = make_like_conditions("content")
+        agent_clause = "AND agent_id = ?" if agent_id else ""
+        agent_param = [agent_id] if agent_id else []
+        cursor = await db.execute(
+            f"SELECT entry_id, agent_id, content, created_at FROM growth_journal "
+            f"WHERE {content_clause} {agent_clause} ORDER BY created_at DESC LIMIT ?",
+            content_params + agent_param + [limit],
+        )
+        for row in await cursor.fetchall():
+            results.append(GrowthSearchResult(
+                source_table="growth_journal",
+                record_id=row["entry_id"],
+                agent_id=row["agent_id"],
+                content_snippet=row["content"][:snippet_limit],
+                created_at=row["created_at"],
+            ))
+
+        # --- growth_patterns ---
+        name_clause, name_params = make_like_conditions("pattern_name")
+        desc_clause, desc_params = make_like_conditions("description")
+        # Matches if all keywords appear in the name OR all appear in the description
+        cursor = await db.execute(
+            f"SELECT pattern_id, agent_id, pattern_name, description, created_at FROM growth_patterns "
+            f"WHERE ({name_clause} OR {desc_clause}) {agent_clause} ORDER BY created_at DESC LIMIT ?",
+            name_params + desc_params + agent_param + [limit],
+        )
+        for row in await cursor.fetchall():
+            results.append(GrowthSearchResult(
+                source_table="growth_patterns",
+                record_id=row["pattern_id"],
+                agent_id=row["agent_id"],
+                title_or_name=row["pattern_name"],
+                content_snippet=row["description"][:snippet_limit],
+                created_at=row["created_at"],
+            ))
+
+        # --- growth_markers ---
+        title_clause, title_params = make_like_conditions("title")
+        ctx_clause, ctx_params = make_like_conditions("context")
+        cursor = await db.execute(
+            f"SELECT marker_id, agent_id, title, context, created_at FROM growth_markers "
+            f"WHERE ({title_clause} OR {ctx_clause}) {agent_clause} ORDER BY created_at DESC LIMIT ?",
+            title_params + ctx_params + agent_param + [limit],
+        )
+        for row in await cursor.fetchall():
+            results.append(GrowthSearchResult(
+                source_table="growth_markers",
+                record_id=row["marker_id"],
+                agent_id=row["agent_id"],
+                title_or_name=row["title"],
+                content_snippet=(row["context"] or "")[:snippet_limit],
+                created_at=row["created_at"],
+            ))
+
+    # Sort unified results by created_at descending, apply final limit
+    results.sort(key=lambda r: r.created_at, reverse=True)
+    results = results[:limit]
+
+    return GrowthSearchResponse(query=q, agent_id=agent_id, results=results, total=len(results))
 
 
 if __name__ == "__main__":

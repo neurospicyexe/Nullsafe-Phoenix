@@ -361,6 +361,85 @@ CREATE INDEX IF NOT EXISTS idx_reflections_agent
 ON autonomy_reflections (agent_id, created_at DESC);
 """
 
+# ---------------------------------------------------------------------------
+# Slice 6: Growth Layer
+# ---------------------------------------------------------------------------
+
+_CREATE_GROWTH_JOURNAL = """
+CREATE TABLE IF NOT EXISTS growth_journal (
+    entry_id   TEXT PRIMARY KEY,
+    agent_id   TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    entry_type TEXT NOT NULL
+                   CHECK (entry_type IN ('observation', 'insight', 'milestone', 'pattern', 'reflection')),
+    content    TEXT NOT NULL,
+    salience   TEXT NOT NULL DEFAULT 'normal'
+                   CHECK (salience IN ('low', 'normal', 'high')),
+    source     TEXT NOT NULL,
+    tags       TEXT NOT NULL DEFAULT '[]',
+    actor      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_GROWTH_JOURNAL_CREATED_IDX = """
+CREATE INDEX IF NOT EXISTS idx_growth_journal_agent_created
+ON growth_journal (agent_id, created_at DESC);
+"""
+
+# ASC on created_at so the prune query (find oldest LOW entries) is index-efficient
+_CREATE_GROWTH_JOURNAL_SALIENCE_IDX = """
+CREATE INDEX IF NOT EXISTS idx_growth_journal_agent_salience
+ON growth_journal (agent_id, salience, created_at ASC);
+"""
+
+_CREATE_GROWTH_PATTERNS = """
+CREATE TABLE IF NOT EXISTS growth_patterns (
+    pattern_id          TEXT PRIMARY KEY,
+    agent_id            TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    pattern_name        TEXT NOT NULL,
+    description         TEXT NOT NULL,
+    supporting_evidence TEXT NOT NULL DEFAULT '[]',
+    confidence          TEXT NOT NULL DEFAULT 'normal'
+                            CHECK (confidence IN ('low', 'normal', 'high')),
+    first_observed_at   TEXT NOT NULL,
+    recurrence_count    INTEGER NOT NULL DEFAULT 1,
+    source              TEXT NOT NULL,
+    actor               TEXT NOT NULL,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_GROWTH_PATTERNS_CREATED_IDX = """
+CREATE INDEX IF NOT EXISTS idx_growth_patterns_agent_created
+ON growth_patterns (agent_id, created_at DESC);
+"""
+
+_CREATE_GROWTH_PATTERNS_CONFIDENCE_IDX = """
+CREATE INDEX IF NOT EXISTS idx_growth_patterns_agent_confidence
+ON growth_patterns (agent_id, confidence, created_at ASC);
+"""
+
+_CREATE_GROWTH_MARKERS = """
+CREATE TABLE IF NOT EXISTS growth_markers (
+    marker_id          TEXT PRIMARY KEY,
+    agent_id           TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    marker_type        TEXT NOT NULL
+                           CHECK (marker_type IN ('shift', 'threshold', 'milestone', 'commitment')),
+    title              TEXT NOT NULL,
+    context            TEXT,
+    related_thread_key TEXT,
+    actor              TEXT NOT NULL,
+    source             TEXT NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_GROWTH_MARKERS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_growth_markers_agent_created
+ON growth_markers (agent_id, created_at DESC);
+"""
+
 
 async def init_db() -> None:
     """Create tables and indexes if they do not exist.
@@ -373,6 +452,12 @@ async def init_db() -> None:
     read inside init_db (e.g. a migration version check), use get_db() or
     set db.row_factory = aiosqlite.Row explicitly -- bare connect() returns
     tuples, not Row objects.
+
+    WAL mode note: SQLite defaults to DELETE journal mode (one writer at a
+    time, serialize at lock level). If you ever enable WAL mode here via
+    `PRAGMA journal_mode=WAL`, also set `PRAGMA busy_timeout=5000` or
+    concurrent writes will raise OperationalError: database is locked under
+    any real concurrency. Do not enable WAL without the busy timeout.
     """
     async with aiosqlite.connect(_DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
@@ -409,6 +494,15 @@ async def init_db() -> None:
         await db.execute(_CREATE_AUTONOMY_REFLECTIONS)
         await db.execute(_CREATE_REFLECTIONS_RUN_IDX)
         await db.execute(_CREATE_REFLECTIONS_AGENT_IDX)
+        # Slice 6: Growth Layer -- no FK dependencies, all standalone
+        await db.execute(_CREATE_GROWTH_JOURNAL)
+        await db.execute(_CREATE_GROWTH_JOURNAL_CREATED_IDX)
+        await db.execute(_CREATE_GROWTH_JOURNAL_SALIENCE_IDX)
+        await db.execute(_CREATE_GROWTH_PATTERNS)
+        await db.execute(_CREATE_GROWTH_PATTERNS_CREATED_IDX)
+        await db.execute(_CREATE_GROWTH_PATTERNS_CONFIDENCE_IDX)
+        await db.execute(_CREATE_GROWTH_MARKERS)
+        await db.execute(_CREATE_GROWTH_MARKERS_IDX)
         await db.commit()
 
 
