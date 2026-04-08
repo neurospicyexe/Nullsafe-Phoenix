@@ -1403,6 +1403,22 @@ async def test_growth_entries_scoped_by_agent(test_app):
     assert test_app.get("/growth/markers?agent_id=drevan").json()["markers"] == []
 
 
+async def test_enforce_cap_allowlist_rejects_bad_table(tmp_db):
+    """_enforce_cap must raise ValueError for any unlisted table/id_col/salience_col."""
+    import pytest as _pytest
+    from services.webmind.main import _enforce_cap
+
+    async with aiosqlite.connect(tmp_db) as db:
+        with _pytest.raises(ValueError, match="disallowed table"):
+            await _enforce_cap(db, "sqlite_master", "rowid", "cypher", 10)
+
+        with _pytest.raises(ValueError, match="disallowed id_col"):
+            await _enforce_cap(db, "growth_journal", "rowid", "cypher", 10)
+
+        with _pytest.raises(ValueError, match="disallowed salience_col"):
+            await _enforce_cap(db, "growth_journal", "entry_id", "cypher", 10, salience_col="injected_col")
+
+
 async def test_growth_journal_invalid_agent(test_app):
     resp = test_app.get("/growth/journal?agent_id=unknown")
     assert resp.status_code == 422
