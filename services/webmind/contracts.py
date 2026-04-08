@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field, field_validator
 
 AgentId = Literal["drevan", "cypher", "gaia"]
 NoteAgentId = Literal["drevan", "cypher", "gaia", "swarm"]
+LifeAgentId = Literal["drevan", "cypher", "gaia", "swarm"]
+ReminderStatus = Literal["pending", "snoozed", "dismissed"]
+Recurrence = Literal["daily", "weekly", "monthly"]
 ActorType = Literal["human", "agent", "system"]
 SourceType = Literal["discord", "webui", "system", "autonomy", "api", "synthesis_loop"]
 ThreadStatus = Literal["open", "paused", "resolved", "archived"]
@@ -198,6 +201,59 @@ class IdentityAnchorSnapshot(BaseModel):
     constraints_summary: Optional[str] = None
     updated_at: str
     source: str
+
+
+class ReminderWriteRequest(BaseModel):
+    """Request to create a life reminder."""
+    agent_id: LifeAgentId
+    title: str = Field(..., min_length=1, max_length=200)
+    body: Optional[str] = None
+    due_at: str = Field(..., description="ISO 8601 datetime when reminder surfaces")
+    recurrence: Optional[Recurrence] = None
+    created_by: ActorType = "human"
+    source: SourceType = "api"
+
+    @field_validator("due_at")
+    @classmethod
+    def validate_due_at(cls, v: str) -> str:
+        datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return v
+
+
+class ReminderRecord(BaseModel):
+    """Stored reminder record."""
+    reminder_id: str
+    agent_id: LifeAgentId
+    title: str
+    body: Optional[str] = None
+    due_at: str
+    recurrence: Optional[Recurrence] = None
+    status: ReminderStatus
+    dismissed_at: Optional[str] = None
+    created_by: ActorType
+    source: SourceType
+    created_at: str
+
+
+class HalsethTaskSummary(BaseModel):
+    """Lightweight task record surfaced in the digest from Halseth."""
+    id: str
+    title: str
+    status: str
+    priority: Optional[str] = None
+    due_at: Optional[str] = None
+    assigned_to: Optional[str] = None
+
+
+class LifeDigestResponse(BaseModel):
+    """Aggregated life-support view for a companion."""
+    agent_id: str
+    due_reminders: List[ReminderRecord] = Field(default_factory=list)
+    upcoming_reminders: List[ReminderRecord] = Field(default_factory=list)
+    open_threads: List[MindThreadRecord] = Field(default_factory=list)
+    halseth_tasks: List[HalsethTaskSummary] = Field(default_factory=list)
+    halseth_available: bool = False
+    generated_at: str
 
 
 class MindOrientResponse(BaseModel):

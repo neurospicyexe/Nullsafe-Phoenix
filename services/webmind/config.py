@@ -13,6 +13,9 @@ class Config:
     WEBMIND_DB_URL: str = os.getenv("WEBMIND_DB_URL", "sqlite:///./data/webmind.db")
     WEBMIND_AUTH_TOKEN: str | None = os.getenv("WEBMIND_AUTH_TOKEN")
     WEBMIND_LOG_LEVEL: str = os.getenv("WEBMIND_LOG_LEVEL", "INFO")
+    # Optional Halseth integration for /life/digest task aggregation
+    HALSETH_URL: str | None = os.getenv("HALSETH_URL")
+    HALSETH_AUTH_TOKEN: str | None = os.getenv("HALSETH_AUTH_TOKEN")
 
     @staticmethod
     def validate() -> None:
@@ -45,5 +48,7 @@ class Config:
         print(f"  DB URL: {Config.WEBMIND_DB_URL}")
         print(f"  Auth token: {'Set' if Config.WEBMIND_AUTH_TOKEN else 'Not set'}")
         print(f"  Log level: {Config.WEBMIND_LOG_LEVEL}")
+        print(f"  Halseth URL: {Config.HALSETH_URL or 'Not set (digest will skip task aggregation)'}")
+        print(f"  Halseth auth: {'Set' if Config.HALSETH_AUTH_TOKEN else 'Not set'}")
         print("=" * 60)
 

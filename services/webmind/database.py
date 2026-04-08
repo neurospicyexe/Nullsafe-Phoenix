@@ -131,6 +131,28 @@ CREATE INDEX IF NOT EXISTS idx_thread_events_key_agent
 ON mind_thread_events (thread_key, agent_id, created_at DESC);
 """
 
+_CREATE_LIFE_REMINDERS = """
+CREATE TABLE IF NOT EXISTS life_reminders (
+    reminder_id  TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia', 'swarm')),
+    title        TEXT NOT NULL,
+    body         TEXT,
+    due_at       TEXT NOT NULL,
+    recurrence   TEXT CHECK (recurrence IN ('daily', 'weekly', 'monthly', NULL)),
+    status       TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending', 'snoozed', 'dismissed')),
+    dismissed_at TEXT,
+    created_by   TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_REMINDERS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_reminders_agent_due
+ON life_reminders (agent_id, due_at, status);
+"""
+
 
 async def init_db() -> None:
     """Create tables and indexes if they do not exist.
@@ -151,6 +173,8 @@ async def init_db() -> None:
         await db.execute(_CREATE_HANDOFFS_IDX)
         await db.execute(_CREATE_MIND_THREAD_EVENTS)
         await db.execute(_CREATE_THREAD_EVENTS_IDX)
+        await db.execute(_CREATE_LIFE_REMINDERS)
+        await db.execute(_CREATE_REMINDERS_IDX)
         await db.commit()
 
 

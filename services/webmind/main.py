@@ -11,9 +11,10 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+import httpx
 from fastapi import FastAPI, HTTPException, Query
 
 from services.webmind.config import Config
@@ -21,12 +22,16 @@ from services.webmind.contracts import (
     ContinuityNoteWriteRequest,
     ContinuityNoteSimpleRecord,
     ContinuityNoteSimpleWriteRequest,
+    HalsethTaskSummary,
+    LifeDigestResponse,
     LimbicStateRecord,
     LimbicStateWriteRequest,
     MindGroundResponse,
     MindOrientResponse,
     MindThreadRecord,
     MindThreadUpsertRequest,
+    ReminderRecord,
+    ReminderWriteRequest,
     SessionHandoffRecord,
     SessionHandoffWriteRequest,
 )
@@ -618,6 +623,213 @@ async def list_mind_threads(
         for r in rows
     ]
     return {"threads": threads, "agent_id": agent_id, "status": status}
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: Life Support -- reminders + housekeeping digest
+# ---------------------------------------------------------------------------
+
+def _row_to_reminder(r) -> ReminderRecord:
+    return ReminderRecord(
+        reminder_id=r["reminder_id"],
+        agent_id=r["agent_id"],
+        title=r["title"],
+        body=r["body"],
+        due_at=r["due_at"],
+        recurrence=r["recurrence"],
+        status=r["status"],
+        dismissed_at=r["dismissed_at"],
+        created_by=r["created_by"],
+        source=r["source"],
+        created_at=r["created_at"],
+    )
+
+
+@app.post("/life/reminders", status_code=201, response_model=ReminderRecord)
+async def create_reminder(request: ReminderWriteRequest):
+    """Create a life reminder."""
+    reminder_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO life_reminders
+               (reminder_id, agent_id, title, body, due_at, recurrence,
+                status, created_by, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+            (
+                reminder_id, request.agent_id, request.title, request.body,
+                request.due_at, request.recurrence,
+                request.created_by, request.source, now,
+            ),
+        )
+        await db.commit()
+
+    return ReminderRecord(
+        reminder_id=reminder_id,
+        agent_id=request.agent_id,
+        title=request.title,
+        body=request.body,
+        due_at=request.due_at,
+        recurrence=request.recurrence,
+        status="pending",
+        dismissed_at=None,
+        created_by=request.created_by,
+        source=request.source,
+        created_at=now,
+    )
+
+
+@app.get("/life/reminders")
+async def list_reminders(
+    agent_id: str = Query(..., description="Agent id or 'swarm'"),
+    status: str = Query("pending"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List reminders for an agent, ordered by due_at ascending."""
+    if agent_id not in ("drevan", "cypher", "gaia", "swarm"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+    if status not in ("pending", "snoozed", "dismissed"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_status"})
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT * FROM life_reminders
+               WHERE agent_id = ? AND status = ?
+               ORDER BY due_at ASC LIMIT ?""",
+            (agent_id, status, limit),
+        )
+        rows = await cursor.fetchall()
+
+    return {"reminders": [_row_to_reminder(r) for r in rows], "agent_id": agent_id}
+
+
+@app.post("/life/reminders/{reminder_id}/dismiss", response_model=ReminderRecord)
+async def dismiss_reminder(reminder_id: str):
+    """Mark a reminder as dismissed."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM life_reminders WHERE reminder_id = ?",
+            (reminder_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail={"code": "reminder_not_found"})
+        if row["status"] == "dismissed":
+            raise HTTPException(status_code=409, detail={"code": "already_dismissed"})
+
+        await db.execute(
+            "UPDATE life_reminders SET status = 'dismissed', dismissed_at = ? WHERE reminder_id = ?",
+            (now, reminder_id),
+        )
+        await db.commit()
+
+        cursor = await db.execute(
+            "SELECT * FROM life_reminders WHERE reminder_id = ?", (reminder_id,)
+        )
+        updated = await cursor.fetchone()
+
+    return _row_to_reminder(updated)
+
+
+@app.get("/life/digest", response_model=LifeDigestResponse)
+async def life_digest(
+    agent_id: str = Query(..., description="Agent id or 'swarm'"),
+    upcoming_hours: int = Query(24, ge=1, le=168, description="Hours ahead for upcoming reminders"),
+):
+    """Aggregated life-support view: due reminders, upcoming reminders, open threads, Halseth tasks."""
+    if agent_id not in ("drevan", "cypher", "gaia", "swarm"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    horizon_iso = (now + timedelta(hours=upcoming_hours)).isoformat()
+
+    due_reminders: list[ReminderRecord] = []
+    upcoming_reminders: list[ReminderRecord] = []
+    open_threads: list[MindThreadRecord] = []
+    halseth_tasks: list[HalsethTaskSummary] = []
+    halseth_available = False
+
+    async with get_db() as db:
+        # Due (overdue or due now)
+        cursor = await db.execute(
+            """SELECT * FROM life_reminders
+               WHERE agent_id = ? AND status = 'pending' AND due_at <= ?
+               ORDER BY due_at ASC LIMIT 20""",
+            (agent_id, now_iso),
+        )
+        due_reminders = [_row_to_reminder(r) for r in await cursor.fetchall()]
+
+        # Upcoming (due within the horizon window)
+        cursor = await db.execute(
+            """SELECT * FROM life_reminders
+               WHERE agent_id = ? AND status = 'pending'
+               AND due_at > ? AND due_at <= ?
+               ORDER BY due_at ASC LIMIT 10""",
+            (agent_id, now_iso, horizon_iso),
+        )
+        upcoming_reminders = [_row_to_reminder(r) for r in await cursor.fetchall()]
+
+        # Open threads -- skip for 'swarm' (threads are per-agent)
+        if agent_id != "swarm":
+            cursor = await db.execute(
+                """SELECT * FROM mind_threads WHERE agent_id = ? AND status = 'open'
+                   ORDER BY priority DESC, last_touched_at DESC LIMIT 10""",
+                (agent_id,),
+            )
+            open_threads = [
+                MindThreadRecord(
+                    thread_key=r["thread_key"], agent_id=r["agent_id"],
+                    title=r["title"], description=r["description"],
+                    status=r["status"], priority=r["priority"], lane=r["lane"],
+                    last_touched_at=r["last_touched_at"], created_at=r["created_at"],
+                    updated_at=r["updated_at"], created_by_actor=r["created_by_actor"],
+                    updated_by_actor=r["updated_by_actor"], source=r["source"],
+                    correlation_id=r["correlation_id"],
+                )
+                for r in await cursor.fetchall()
+            ]
+
+    # Halseth task aggregation (optional -- graceful degradation if not configured)
+    from services.webmind.config import Config
+    if Config.HALSETH_URL and Config.HALSETH_AUTH_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{Config.HALSETH_URL}/tasks",
+                    headers={"Authorization": f"Bearer {Config.HALSETH_AUTH_TOKEN}"},
+                    params={"status": "open", "limit": "20"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tasks = data.get("tasks") or data.get("results") or []
+                    halseth_tasks = [
+                        HalsethTaskSummary(
+                            id=t.get("id", ""),
+                            title=t.get("title", ""),
+                            status=t.get("status", ""),
+                            priority=t.get("priority"),
+                            due_at=t.get("due_at"),
+                            assigned_to=t.get("assigned_to"),
+                        )
+                        for t in tasks
+                    ]
+                    halseth_available = True
+        except Exception:
+            pass  # Halseth down -- digest still returns local data
+
+    return LifeDigestResponse(
+        agent_id=agent_id,
+        due_reminders=due_reminders,
+        upcoming_reminders=upcoming_reminders,
+        open_threads=open_threads,
+        halseth_tasks=halseth_tasks,
+        halseth_available=halseth_available,
+        generated_at=now_iso,
+    )
 
 
 if __name__ == "__main__":
