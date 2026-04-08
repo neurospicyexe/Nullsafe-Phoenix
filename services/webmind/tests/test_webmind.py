@@ -59,7 +59,7 @@ class TestStubEndpoints:
         data = response.json()
         assert data["agent_id"] == "cypher"
 
-    def test_mind_thread_upsert_stub_validates_contract(self):
+    def test_mind_thread_upsert_creates_thread(self):
         response = client.post(
             "/mind/threads/upsert",
             json={
@@ -70,10 +70,11 @@ class TestStubEndpoints:
                 "metadata": {"actor": "agent", "source": "system"},
             },
         )
-        assert response.status_code == 501
-        detail = response.json()["detail"]
-        assert detail["endpoint"] == "mind_thread_upsert"
-        assert detail["agent_id"] == "drevan"
+        assert response.status_code == 200
+        data = response.json()
+        assert data["agent_id"] == "drevan"
+        assert data["title"] == "Continue WebMind slice work"
+        assert data["status"] == "open"
 
 
 class TestContracts:
@@ -326,4 +327,289 @@ async def test_orient_returns_200_with_no_limbic_state(test_app):
     data = resp.json()
     assert data["limbic_state"] is None
     assert data["recent_notes"] == []
+
+
+# ---------------------------------------------------------------------------
+# Session handoff tests
+# ---------------------------------------------------------------------------
+
+_HANDOFF_PAYLOAD = {
+    "agent_id": "cypher",
+    "title": "Slice 2 checkpoint",
+    "summary": "Finished session-handoff endpoints.",
+    "next_steps": "Write ground tests.",
+    "open_loops": "Thread upsert edge cases.",
+    "state_hint": "practical",
+    "metadata": {"actor": "agent", "source": "system"},
+}
+
+
+async def test_post_handoff_returns_201(test_app):
+    resp = test_app.post("/mind/session-handoffs", json=_HANDOFF_PAYLOAD)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "handoff_id" in data
+    assert data["agent_id"] == "cypher"
+    assert data["title"] == "Slice 2 checkpoint"
+    assert data["actor"] == "agent"
+
+
+async def test_get_handoffs_returns_list(test_app):
+    test_app.post("/mind/session-handoffs", json=_HANDOFF_PAYLOAD)
+    test_app.post("/mind/session-handoffs", json={**_HANDOFF_PAYLOAD, "title": "second"})
+    resp = test_app.get("/mind/session-handoffs?agent_id=cypher&limit=10")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data["handoffs"], list)
+    assert len(data["handoffs"]) == 2
+    assert data["handoffs"][0]["title"] == "second"  # most recent first
+
+
+async def test_get_handoffs_empty(test_app):
+    resp = test_app.get("/mind/session-handoffs?agent_id=drevan")
+    assert resp.status_code == 200
+    assert resp.json()["handoffs"] == []
+
+
+async def test_get_handoffs_invalid_agent(test_app):
+    resp = test_app.get("/mind/session-handoffs?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Mind thread tests
+# ---------------------------------------------------------------------------
+
+_THREAD_PAYLOAD = {
+    "agent_id": "cypher",
+    "title": "WebMind slice work",
+    "description": "Track remaining Slice 2 tasks.",
+    "priority": 8,
+    "lane": "ops",
+    "metadata": {"actor": "agent", "source": "system"},
+}
+
+
+async def test_upsert_thread_creates_new(test_app):
+    resp = test_app.post("/mind/threads/upsert", json=_THREAD_PAYLOAD)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "thread_key" in data
+    assert data["agent_id"] == "cypher"
+    assert data["status"] == "open"
+    assert data["priority"] == 8
+
+
+async def test_upsert_thread_updates_existing(test_app):
+    create_resp = test_app.post("/mind/threads/upsert", json=_THREAD_PAYLOAD)
+    thread_key = create_resp.json()["thread_key"]
+
+    update_resp = test_app.post("/mind/threads/upsert", json={
+        **_THREAD_PAYLOAD,
+        "thread_key": thread_key,
+        "title": "Updated title",
+        "priority": 9,
+        "status": "paused",
+    })
+    assert update_resp.status_code == 200
+    data = update_resp.json()
+    assert data["thread_key"] == thread_key
+    assert data["title"] == "Updated title"
+    assert data["priority"] == 9
+    assert data["status"] == "paused"
+
+
+async def test_list_threads_returns_open(test_app):
+    test_app.post("/mind/threads/upsert", json=_THREAD_PAYLOAD)
+    test_app.post("/mind/threads/upsert", json={**_THREAD_PAYLOAD, "title": "second thread"})
+    resp = test_app.get("/mind/threads?agent_id=cypher&status=open")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data["threads"], list)
+    assert len(data["threads"]) == 2
+
+
+async def test_list_threads_invalid_agent(test_app):
+    resp = test_app.get("/mind/threads?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+async def test_list_threads_filters_by_status(test_app):
+    create_resp = test_app.post("/mind/threads/upsert", json=_THREAD_PAYLOAD)
+    thread_key = create_resp.json()["thread_key"]
+    test_app.post("/mind/threads/upsert", json={
+        **_THREAD_PAYLOAD, "thread_key": thread_key, "status": "resolved"
+    })
+    open_resp = test_app.get("/mind/threads?agent_id=cypher&status=open")
+    resolved_resp = test_app.get("/mind/threads?agent_id=cypher&status=resolved")
+    assert len(open_resp.json()["threads"]) == 0
+    assert len(resolved_resp.json()["threads"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Orient completeness tests
+# ---------------------------------------------------------------------------
+
+async def test_orient_includes_latest_handoff(test_app):
+    test_app.post("/mind/session-handoffs", json=_HANDOFF_PAYLOAD)
+    resp = test_app.get("/mind/orient?agent_id=cypher")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["latest_handoff"] is not None
+    assert data["latest_handoff"]["title"] == "Slice 2 checkpoint"
+
+
+async def test_orient_includes_top_threads(test_app):
+    test_app.post("/mind/threads/upsert", json=_THREAD_PAYLOAD)
+    resp = test_app.get("/mind/orient?agent_id=cypher")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["top_threads"]) == 1
+    assert data["top_threads"][0]["title"] == "WebMind slice work"
+
+
+async def test_orient_latest_handoff_none_when_empty(test_app):
+    resp = test_app.get("/mind/orient?agent_id=gaia")
+    assert resp.status_code == 200
+    assert resp.json()["latest_handoff"] is None
+    assert resp.json()["top_threads"] == []
+
+
+# ---------------------------------------------------------------------------
+# Ground endpoint tests
+# ---------------------------------------------------------------------------
+
+async def test_ground_returns_200_empty(test_app):
+    resp = test_app.get("/mind/ground?agent_id=drevan")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["agent_id"] == "drevan"
+    assert data["open_threads"] == []
+    assert data["recent_handoffs"] == []
+    assert data["recent_notes"] == []
+
+
+async def test_ground_returns_open_threads_and_handoffs(test_app):
+    test_app.post("/mind/threads/upsert", json={**_THREAD_PAYLOAD, "agent_id": "drevan"})
+    test_app.post("/mind/session-handoffs", json={**_HANDOFF_PAYLOAD, "agent_id": "drevan"})
+    resp = test_app.get("/mind/ground?agent_id=drevan")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["open_threads"]) == 1
+    assert len(data["recent_handoffs"]) == 1
+
+
+async def test_ground_invalid_agent(test_app):
+    resp = test_app.get("/mind/ground?agent_id=unknown")
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Database table existence tests (extended)
+# ---------------------------------------------------------------------------
+
+async def test_init_db_creates_session_handoffs_table(tmp_db):
+    async with aiosqlite.connect(tmp_db) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='session_handoffs'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None, "session_handoffs table not created"
+
+
+async def test_init_db_creates_mind_threads_table(tmp_db):
+    async with aiosqlite.connect(tmp_db) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='mind_threads'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None, "mind_threads table not created"
+
+
+async def test_init_db_creates_mind_thread_events_table(tmp_db):
+    async with aiosqlite.connect(tmp_db) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='mind_thread_events'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None, "mind_thread_events table not created"
+
+
+# ---------------------------------------------------------------------------
+# FK enforcement tests
+# ---------------------------------------------------------------------------
+
+async def test_thread_event_fk_rejects_orphan(tmp_db):
+    """Inserting a thread event with no parent thread must raise IntegrityError."""
+    import pytest
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(Exception):
+            await db.execute(
+                """INSERT INTO mind_thread_events
+                   (event_id, thread_key, agent_id, event_type, event_summary,
+                    actor, source, created_at)
+                   VALUES ('ev-1', 'nonexistent-key', 'cypher', 'created', 'test', 'agent', 'system', datetime('now'))"""
+            )
+            await db.commit()
+
+
+async def test_handoff_thread_fk_rejects_bad_thread_id(tmp_db):
+    """Inserting a handoff with a non-null thread_id that doesn't exist must raise."""
+    import pytest
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(Exception):
+            await db.execute(
+                """INSERT INTO session_handoffs
+                   (handoff_id, agent_id, thread_id, title, summary, next_steps,
+                    open_loops, actor, source, created_at)
+                   VALUES ('h-1', 'cypher', 'bad-thread-key', 'title', 'sum',
+                           'next', 'loops', 'agent', 'system', datetime('now'))"""
+            )
+            await db.commit()
+
+
+async def test_thread_deletion_blocked_when_handoff_references_it(tmp_db):
+    """Deleting a thread that a handoff references must raise (ON DELETE RESTRICT)."""
+    import pytest
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """INSERT INTO mind_threads
+               (thread_key, agent_id, title, status, priority, last_touched_at,
+                created_at, updated_at, created_by_actor, updated_by_actor, source)
+               VALUES ('tk-1', 'cypher', 'test thread', 'open', 5,
+                       datetime('now'), datetime('now'), datetime('now'),
+                       'agent', 'agent', 'system')"""
+        )
+        await db.execute(
+            """INSERT INTO session_handoffs
+               (handoff_id, agent_id, thread_id, title, summary, next_steps,
+                open_loops, actor, source, created_at)
+               VALUES ('h-3', 'cypher', 'tk-1', 'title', 'sum',
+                       'next', 'loops', 'agent', 'system', datetime('now'))"""
+        )
+        await db.commit()
+
+        with pytest.raises(Exception):
+            await db.execute(
+                "DELETE FROM mind_threads WHERE thread_key = 'tk-1' AND agent_id = 'cypher'"
+            )
+            await db.commit()
+
+
+async def test_handoff_null_thread_id_is_allowed(tmp_db):
+    """Handoffs with NULL thread_id must succeed -- nullable FK is not enforced."""
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """INSERT INTO session_handoffs
+               (handoff_id, agent_id, thread_id, title, summary, next_steps,
+                open_loops, actor, source, created_at)
+               VALUES ('h-2', 'cypher', NULL, 'title', 'sum',
+                       'next', 'loops', 'agent', 'system', datetime('now'))"""
+        )
+        await db.commit()
+    # no exception = pass
 
