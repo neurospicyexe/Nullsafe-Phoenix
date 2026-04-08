@@ -12,7 +12,10 @@
       "Bash(git add:*)",
       "Bash(pytest:*)",
       "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
-      "mcp__plugin_context-mode_context-mode__ctx_execute_file"
+      "mcp__plugin_context-mode_context-mode__ctx_execute_file",
+      "Bash(npx tsc:*)",
+      "Bash(npx --prefix \"C:\\\\dev\\\\Bigger_Better_Halseth\\\\halseth\" tsc --noEmit --project \"C:\\\\dev\\\\Bigger_Better_Halseth\\\\halseth\\\\tsconfig.json\")",
+      "Bash(xargs grep:*)"
     ]
   }
 }

@@ -2,11 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
+## CRITICAL CONTEXT — Read This First
+
+Phoenix is NOT the live system. It is the future target. The live companion suite is **Bigger Better Halseth (BBH)**, located at `C:\dev\Bigger_Better_Halseth`.
+
+**What's actually running right now:**
+- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0044. This IS the WebMind for the lean phase.
+- **nullsafe-second-brain** -- VPS MCP server. Obsidian vault synthesis, RAG, persona-feeder.
+- **nullsafe-discord** -- Railway deployment. Three live Discord bots (Drevan, Cypher, Gaia).
+- **nullsafe-plural-v2** -- Cloudflare Worker. SimplyPlural fronting integration.
+- **Hearth** -- Next.js dashboard. Reads Halseth live data.
+
+**What Phoenix is:**
+The reliability kernel (Relay, Brain, Redis queues, Web UI) is complete and sits here as the future host for Heart Phase. When Heart Phase ships, Phoenix absorbs the BBH suite. The WebMind microservice (`services/webmind/`) here is a future scaffold -- Halseth IS the WebMind until Phoenix Heart Phase is ready.
+
+**Before working on Phoenix, read:**
+- `C:\dev\Bigger_Better_Halseth\CLAUDE.md` -- full BBH suite context, architecture decisions, what's live
+- `C:\dev\Bigger_Better_Halseth\docs\implementation-log.md` -- full history of what shipped and why
+
+**Current Heart Phase status:** Kernel complete. Heart Phase not yet built. See `PHOENIX_HEART_PHASE_PLAN.md` for the 7-slice plan. Nothing in `services/webmind/` here is live -- Halseth owns that surface until Phoenix absorbs it.
+
+---
+
 ## Project Overview
 
 Nullsafe Phoenix v2 is a reliability-first agent orchestration system built on strict architectural separation. Five microservices communicate via Redis queues and HTTP, enabling Discord bots to interact with AI agents running on a local workstation, with persistent mind/continuity state stored in WebMind.
 
-**Current Status**: Heart Phase — Phase 1 complete; Slice 1 (planning) complete; Slice 2 (WebMind implementation) in progress.
+**Current Status**: Kernel complete. Heart Phase not yet started. See above for what is actually live.
 
 **Planning Documents**:
 - [PHOENIX_HEART_PHASE_PLAN.md](PHOENIX_HEART_PHASE_PLAN.md) - Master Heart Phase plan (7 slices)
@@ -336,8 +360,10 @@ All services use environment variables with fail-fast validation and safe startu
 
 ## Phase Status
 
-Phase 1 complete; Heart Phase Slice 1 (planning) complete; Slice 2 (WebMind) in progress.
-Details: `docs/phase-status.md`
+Kernel complete (Relay, Brain, Redis queues, Discord bots stub, Web UI).
+Heart Phase not yet started -- planning docs exist but no Heart Phase code has shipped.
+The live system is BBH (see top of this file). Phoenix absorbs it when Heart Phase is ready (target: summer 2026).
+Details: `docs/phase-status.md` and `PHOENIX_HEART_PHASE_PLAN.md`.
 
 ## Development Guidelines
 

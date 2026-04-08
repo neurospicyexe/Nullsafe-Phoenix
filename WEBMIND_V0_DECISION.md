@@ -1,7 +1,9 @@
 # WebMind v0 Boundary Decision (Slice 1)
 
 Created: February 24, 2026
-Status: Accepted for v0 planning
+Status: **SUPERSEDED** -- This describes Phoenix WebMind as a separate microservice.
+The actual v0 implementation landed in Halseth (`halseth/src/webmind/`, wm_* tables, migrations 0027+).
+Keep as Heart Phase reference -- when Phoenix absorbs BBH, this interface design still applies.
 
 ## Decision
 
