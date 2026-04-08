@@ -265,6 +265,127 @@ class LifeDigestResponse(BaseModel):
     generated_at: str
 
 
+# ---------------------------------------------------------------------------
+# Slice 4: Bond Layer contracts
+# ---------------------------------------------------------------------------
+
+BondThreadStatus = Literal["open", "paused", "resolved", "archived"]
+BondThreadType = Literal["commitment", "repair", "shared_memory", "ongoing"]
+BondNoteType = Literal["observation", "repair", "commitment", "gratitude", "rupture"]
+
+
+class BondThreadWriteRequest(BaseModel):
+    """Open or update a relational bond thread."""
+    agent_id: AgentId
+    toward: str = Field(..., min_length=1, max_length=100)
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    thread_type: BondThreadType = "commitment"
+    priority: int = Field(5, ge=1, le=10)
+    created_by: ActorType = "agent"
+    source: SourceType = "api"
+
+
+class BondThreadUpdateRequest(BaseModel):
+    """Partial update for an existing bond thread."""
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    status: Optional[BondThreadStatus] = None
+    priority: Optional[int] = Field(None, ge=1, le=10)
+    updated_by: ActorType = "agent"
+    source: SourceType = "api"
+
+
+class BondThreadRecord(BaseModel):
+    """Stored bond thread record."""
+    thread_key: str
+    agent_id: AgentId
+    toward: str
+    title: str
+    description: Optional[str] = None
+    status: BondThreadStatus
+    thread_type: BondThreadType
+    priority: int
+    created_by: ActorType
+    source: SourceType
+    created_at: str
+    updated_at: str
+
+
+class BondHandoffWriteRequest(BaseModel):
+    """Write a relational-specific session handoff."""
+    agent_id: AgentId
+    toward: str = Field(..., min_length=1, max_length=100)
+    relational_state: str = Field(..., min_length=1)
+    carried_forward: str = Field(..., min_length=1)
+    open_threads_summary: Optional[str] = None
+    repair_needed: bool = False
+    actor: ActorType = "agent"
+    source: SourceType = "api"
+
+
+class BondHandoffRecord(BaseModel):
+    """Stored bond handoff summary."""
+    handoff_id: str
+    agent_id: AgentId
+    toward: str
+    relational_state: str
+    carried_forward: str
+    open_threads_summary: Optional[str] = None
+    repair_needed: bool
+    actor: ActorType
+    source: SourceType
+    created_at: str
+
+
+class BondNoteWriteRequest(BaseModel):
+    """Append a note about the bond with a specific person."""
+    agent_id: AgentId
+    toward: str = Field(..., min_length=1, max_length=100)
+    note_text: str = Field(..., min_length=1)
+    note_type: BondNoteType = "observation"
+    thread_key: Optional[str] = None
+    actor: ActorType = "agent"
+    source: SourceType = "api"
+
+
+class BondNoteRecord(BaseModel):
+    """Stored bond note."""
+    note_id: str
+    agent_id: AgentId
+    toward: str
+    note_text: str
+    note_type: BondNoteType
+    thread_key: Optional[str] = None
+    actor: ActorType
+    source: SourceType
+    created_at: str
+
+
+class HalsethRelationalStateEntry(BaseModel):
+    """Single companion_relational_state row proxied from Halseth."""
+    id: str
+    companion_id: str
+    toward: str
+    state_text: str
+    weight: float
+    state_type: str
+    noted_at: str
+
+
+class BondStateResponse(BaseModel):
+    """Relational state view proxied from Halseth companion_relational_state.
+
+    Halseth is authoritative for relational state -- Phoenix does not duplicate it.
+    This endpoint proxies and returns gracefully when Halseth is unavailable.
+    """
+    agent_id: AgentId
+    toward: Optional[str] = None
+    entries: List[HalsethRelationalStateEntry] = Field(default_factory=list)
+    halseth_available: bool = False
+    generated_at: str
+
+
 class MindOrientResponse(BaseModel):
     """Response for continuity recovery view."""
 

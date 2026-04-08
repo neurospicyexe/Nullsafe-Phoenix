@@ -153,6 +153,80 @@ CREATE INDEX IF NOT EXISTS idx_reminders_agent_status_due
 ON life_reminders (agent_id, status, due_at);
 """
 
+# ---------------------------------------------------------------------------
+# Slice 4: Bond Layer
+# ---------------------------------------------------------------------------
+
+_CREATE_BOND_THREADS = """
+CREATE TABLE IF NOT EXISTS bond_threads (
+    thread_key   TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    toward       TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    description  TEXT,
+    status       TEXT NOT NULL DEFAULT 'open'
+                     CHECK (status IN ('open', 'paused', 'resolved', 'archived')),
+    thread_type  TEXT NOT NULL DEFAULT 'commitment'
+                     CHECK (thread_type IN ('commitment', 'repair', 'shared_memory', 'ongoing')),
+    priority     INTEGER NOT NULL DEFAULT 5,
+    created_by   TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+"""
+
+_CREATE_BOND_THREADS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_bond_threads_agent_status
+ON bond_threads (agent_id, status, priority DESC);
+"""
+
+_CREATE_BOND_THREADS_TOWARD_IDX = """
+CREATE INDEX IF NOT EXISTS idx_bond_threads_agent_toward
+ON bond_threads (agent_id, toward, status);
+"""
+
+_CREATE_BOND_HANDOFFS = """
+CREATE TABLE IF NOT EXISTS bond_handoff_summaries (
+    handoff_id           TEXT PRIMARY KEY,
+    agent_id             TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    toward               TEXT NOT NULL,
+    relational_state     TEXT NOT NULL,
+    carried_forward      TEXT NOT NULL,
+    open_threads_summary TEXT,
+    repair_needed        INTEGER NOT NULL DEFAULT 0,
+    actor                TEXT NOT NULL,
+    source               TEXT NOT NULL,
+    created_at           TEXT NOT NULL
+);
+"""
+
+_CREATE_BOND_HANDOFFS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_bond_handoffs_agent_toward
+ON bond_handoff_summaries (agent_id, toward, created_at DESC);
+"""
+
+_CREATE_BOND_NOTES = """
+CREATE TABLE IF NOT EXISTS bond_notes (
+    note_id     TEXT PRIMARY KEY,
+    agent_id    TEXT NOT NULL CHECK (agent_id IN ('drevan', 'cypher', 'gaia')),
+    toward      TEXT NOT NULL,
+    note_text   TEXT NOT NULL,
+    note_type   TEXT NOT NULL DEFAULT 'observation'
+                    CHECK (note_type IN ('observation', 'repair', 'commitment', 'gratitude', 'rupture')),
+    thread_key  TEXT,
+    actor       TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (thread_key) REFERENCES bond_threads (thread_key) ON DELETE RESTRICT
+);
+"""
+
+_CREATE_BOND_NOTES_IDX = """
+CREATE INDEX IF NOT EXISTS idx_bond_notes_agent_toward
+ON bond_notes (agent_id, toward, created_at DESC);
+"""
+
 
 async def init_db() -> None:
     """Create tables and indexes if they do not exist.
@@ -181,6 +255,14 @@ async def init_db() -> None:
         await db.execute(_CREATE_THREAD_EVENTS_IDX)
         await db.execute(_CREATE_LIFE_REMINDERS)
         await db.execute(_CREATE_REMINDERS_IDX)
+        # Slice 4: Bond Layer -- bond_threads before bond_notes (FK dependency)
+        await db.execute(_CREATE_BOND_THREADS)
+        await db.execute(_CREATE_BOND_THREADS_IDX)
+        await db.execute(_CREATE_BOND_THREADS_TOWARD_IDX)
+        await db.execute(_CREATE_BOND_HANDOFFS)
+        await db.execute(_CREATE_BOND_HANDOFFS_IDX)
+        await db.execute(_CREATE_BOND_NOTES)
+        await db.execute(_CREATE_BOND_NOTES_IDX)
         await db.commit()
 
 
