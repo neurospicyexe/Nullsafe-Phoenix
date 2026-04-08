@@ -149,8 +149,8 @@ CREATE TABLE IF NOT EXISTS life_reminders (
 """
 
 _CREATE_REMINDERS_IDX = """
-CREATE INDEX IF NOT EXISTS idx_reminders_agent_due
-ON life_reminders (agent_id, due_at, status);
+CREATE INDEX IF NOT EXISTS idx_reminders_agent_status_due
+ON life_reminders (agent_id, status, due_at);
 """
 
 
