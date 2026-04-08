@@ -75,3 +75,6 @@ dump.rdb
 # Tool/runtime dirs
 .serena/
 data/
+
+# Personal notes (gitignored -- write freely)
+README.raziel.md
