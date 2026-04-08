@@ -1592,7 +1592,7 @@ async def write_run_reflection(run_id: str, request: AutonomyRunReflectRequest):
                 reflection_id, run_id, run["agent_id"],
                 request.reflection_type, request.title, request.content,
                 request.model_used, request.target_ref,
-                run["actor"], run["source"], now,
+                request.metadata.actor, request.metadata.source, now,
             ),
         )
         await db.commit()

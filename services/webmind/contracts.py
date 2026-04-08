@@ -8,6 +8,7 @@ These models lock names and shapes across slices:
 - Slice 5: autonomy v0 (schedules, seeds, runs, logs, reflections)
 """
 
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
@@ -433,6 +434,13 @@ class AutonomyScheduleWriteRequest(BaseModel):
     allowed_actions: List[str] = Field(default_factory=lambda: ["search", "read", "inference"])
     metadata: WriteMetadata
 
+    @field_validator("quiet_hours_start", "quiet_hours_end", mode="before")
+    @classmethod
+    def validate_hhmm(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not re.match(r"^\d{2}:\d{2}$", v):
+            raise ValueError("must be HH:MM format (e.g. '22:00')")
+        return v
+
 
 class AutonomyScheduleRecord(BaseModel):
     """Stored autonomy schedule."""
@@ -530,12 +538,18 @@ class AutonomyRunLogRecord(BaseModel):
 
 
 class AutonomyRunReflectRequest(BaseModel):
-    """Write a Phase 2 synthesis reflection."""
+    """Write a Phase 2 synthesis reflection.
+
+    metadata is required so each reflection carries its own actor/source attribution
+    rather than inheriting silently from the run record. The quality model writing
+    the synthesis may differ from the actor that started the run.
+    """
     reflection_type: ReflectionType
     title: str = Field(..., min_length=1, max_length=200)
     content: str = Field(..., min_length=1)
-    model_used: Optional[str] = Field(None, max_length=100)  # e.g. "claude-sonnet-4-20250514"
+    model_used: Optional[str] = Field(None, max_length=100)  # e.g. "claude-sonnet-4-6"
     target_ref: Optional[str] = None  # soft ref to where synthesis was deposited
+    metadata: WriteMetadata
 
 
 class AutonomyReflectionRecord(BaseModel):
