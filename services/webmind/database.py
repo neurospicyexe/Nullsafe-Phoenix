@@ -4,11 +4,33 @@
 WebMind SQLite database module.
 
 Manages aiosqlite connection and schema init for:
-- limbic_states: synthesized swarm state records
-- continuity_notes: companion and synthesis notes
-- session_handoffs: session checkpoints per companion
-- mind_threads: persistent companion threads
-- mind_thread_events: append-only event log for thread changes
+
+Slice 2 (continuity):
+  - limbic_states: synthesized swarm state records
+  - continuity_notes: companion and synthesis notes (cap: 100/agent)
+  - session_handoffs: session checkpoints per companion (cap: 30/agent)
+  - mind_threads: persistent companion threads
+  - mind_thread_events: append-only event log for thread changes (TTL: 90d)
+
+Slice 3 (life support):
+  - life_reminders: companion reminders with status lifecycle
+
+Slice 4 (bond layer):
+  - bond_threads: relational threads per companion (toward a person)
+  - bond_handoff_summaries: relational session handoffs (cap: 30/agent)
+  - bond_notes: bond observations and repair notes (cap: 200/agent)
+
+Slice 5 (autonomy):
+  - autonomy_schedules: per-companion run schedule (one per companion)
+  - autonomy_seeds: interest/curiosity seeds for autonomous exploration
+  - autonomy_runs: execution records for autonomous runs (TTL: 90d terminal)
+  - autonomy_run_logs: phase-1 exploration step log (TTL: 90d)
+  - autonomy_reflections: phase-2 synthesis output
+
+Slice 6 (growth):
+  - growth_journal: developmental observations/insights (cap: 200/agent, salience-aware)
+  - growth_patterns: recurring companion patterns (cap: 50/agent, confidence-aware)
+  - growth_markers: significant developmental moments (cap: 100/agent)
 """
 
 from contextlib import asynccontextmanager

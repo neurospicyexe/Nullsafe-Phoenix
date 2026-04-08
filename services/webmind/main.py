@@ -506,6 +506,7 @@ async def create_session_handoff(request: SessionHandoffWriteRequest):
                 now,
             ),
         )
+        await _enforce_cap(db, "session_handoffs", "handoff_id", request.agent_id, 30)
         await db.commit()
 
     return SessionHandoffRecord(
@@ -885,7 +886,6 @@ async def life_digest(
             ]
 
     # Halseth task aggregation (optional -- graceful degradation if not configured)
-    from services.webmind.config import Config
     if Config.HALSETH_URL and Config.HALSETH_AUTH_TOKEN:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -909,11 +909,13 @@ async def life_digest(
                         for t in tasks
                     ]
                     halseth_available = True
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            # Transient -- Halseth temporarily unreachable. Debug-level is fine.
+            logger.debug("Halseth task fetch timeout/connect error (digest will skip tasks): %s", e)
         except Exception as e:
-            # Graceful degradation -- Halseth down or misconfigured.
-            # Log at debug so operators can distinguish a typo in HALSETH_URL
-            # from an expected transient outage.
-            logger.debug("Halseth task fetch failed (digest will skip tasks): %s", e)
+            # Unexpected -- misconfigured URL, bad response shape, auth failure.
+            # Warn so operators see it in INFO-level logs without tailing debug.
+            logger.warning("Halseth task fetch failed unexpectedly (digest will skip tasks): %s", e)
 
     return LifeDigestResponse(
         agent_id=agent_id,
@@ -1009,8 +1011,10 @@ async def bond_state_read(
                         for r in rows
                     ]
                     halseth_available = True
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            logger.debug("Halseth relational state fetch timeout/connect error: %s", e)
         except Exception as e:
-            logger.debug("Halseth relational state fetch failed: %s", e)
+            logger.warning("Halseth relational state fetch failed unexpectedly: %s", e)
 
     return BondStateResponse(
         agent_id=agent_id,
@@ -1149,6 +1153,7 @@ async def write_bond_handoff(request: BondHandoffWriteRequest):
                 request.actor, request.source, now,
             ),
         )
+        await _enforce_cap(db, "bond_handoff_summaries", "handoff_id", request.agent_id, 30)
         await db.commit()
 
     return BondHandoffRecord(
@@ -1197,17 +1202,18 @@ async def add_bond_note(request: BondNoteWriteRequest):
     now = datetime.now(timezone.utc).isoformat()
 
     async with get_db() as db:
-        # Validate thread_key if provided -- gives 422 not 500
+        # Validate thread_key if provided -- scoped to agent, gives 422 not 500
         if request.thread_key is not None:
             cursor = await db.execute(
-                "SELECT 1 FROM bond_threads WHERE thread_key = ?", (request.thread_key,)
+                "SELECT 1 FROM bond_threads WHERE thread_key = ? AND agent_id = ?",
+                (request.thread_key, request.agent_id),
             )
             if await cursor.fetchone() is None:
                 raise HTTPException(
                     status_code=422,
                     detail={
                         "code": "bond_thread_not_found",
-                        "message": f"thread_key '{request.thread_key}' does not exist",
+                        "message": f"thread_key '{request.thread_key}' does not exist for agent '{request.agent_id}'",
                     },
                 )
 
@@ -1222,6 +1228,7 @@ async def add_bond_note(request: BondNoteWriteRequest):
                 request.actor, request.source, now,
             ),
         )
+        await _enforce_cap(db, "bond_notes", "note_id", request.agent_id, 200)
         await db.commit()
 
     return BondNoteRecord(
@@ -1270,10 +1277,12 @@ async def list_bond_notes(
 # ---------------------------------------------------------------------------
 
 _ENFORCE_CAP_ALLOWED_TABLES = frozenset({
-    "growth_journal", "growth_patterns", "growth_markers", "continuity_notes"
+    "continuity_notes",
+    "session_handoffs", "bond_handoff_summaries", "bond_notes",
+    "growth_journal", "growth_patterns", "growth_markers",
 })
 _ENFORCE_CAP_ALLOWED_ID_COLS = frozenset({
-    "entry_id", "pattern_id", "marker_id", "note_id"
+    "entry_id", "pattern_id", "marker_id", "note_id", "handoff_id"
 })
 _ENFORCE_CAP_ALLOWED_SALIENCE_COLS = frozenset({"salience", "confidence"})
 
@@ -2007,7 +2016,7 @@ async def list_growth_markers(
 
 @app.post("/growth/housekeeping", response_model=HousekeepingResponse)
 async def growth_housekeeping():
-    """Run 90-day TTL cleanup on autonomy_run_logs and mind_thread_events."""
+    """Run 90-day TTL cleanup on append-only audit tables and stale autonomy data."""
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=90)).isoformat()
     ran_at = now.isoformat()
@@ -2023,12 +2032,30 @@ async def growth_housekeeping():
         )
         pruned_thread_events = cursor.rowcount
 
+        # Autonomy runs older than 90 days (terminal status only -- don't touch active runs)
+        cursor = await db.execute(
+            "DELETE FROM autonomy_runs WHERE created_at < ? "
+            "AND status IN ('completed', 'failed', 'cancelled')",
+            (cutoff,),
+        )
+        pruned_runs = cursor.rowcount
+
+        # Stale seeds (used/expired/dismissed older than 90 days)
+        cursor = await db.execute(
+            "DELETE FROM autonomy_seeds WHERE created_at < ? "
+            "AND status IN ('used', 'expired', 'dismissed')",
+            (cutoff,),
+        )
+        pruned_seeds = cursor.rowcount
+
         await db.commit()
 
     return HousekeepingResponse(
         pruned={
             "autonomy_run_logs": pruned_run_logs,
             "mind_thread_events": pruned_thread_events,
+            "autonomy_runs": pruned_runs,
+            "autonomy_seeds": pruned_seeds,
         },
         ran_at=ran_at,
     )
