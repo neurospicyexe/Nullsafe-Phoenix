@@ -91,7 +91,7 @@ async def verify_token(
 
 app = FastAPI(
     title="Nullsafe Phoenix WebMind",
-    version="v0-slice2-scaffold",
+    version="v0-slice4",
     description="Persistent continuity and mind-state API (scaffold)",
     lifespan=lifespan,
     dependencies=[Depends(verify_token)],
@@ -600,7 +600,7 @@ async def upsert_mind_thread(request: MindThreadUpsertRequest):
             request.title
             if event_type == "created"
             else f"{previous['title']} → {request.title}" if request.title != previous["title"]
-            else f"status: {previous['status']} → {payload.get('previous_status', previous['status'])}"
+            else f"status: {previous['status']} → {request.status}"
             if event_type == "status_changed"
             else f"updated: {request.title}"
         )
@@ -772,21 +772,26 @@ async def dismiss_reminder(reminder_id: str):
     now = datetime.now(timezone.utc).isoformat()
 
     async with get_db() as db:
+        # Verify the reminder exists first (need a clean 404 vs 409 distinction).
         cursor = await db.execute(
-            "SELECT * FROM life_reminders WHERE reminder_id = ?",
+            "SELECT status FROM life_reminders WHERE reminder_id = ?",
             (reminder_id,),
         )
         row = await cursor.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail={"code": "reminder_not_found"})
-        if row["status"] == "dismissed":
-            raise HTTPException(status_code=409, detail={"code": "already_dismissed"})
 
-        await db.execute(
-            "UPDATE life_reminders SET status = 'dismissed', dismissed_at = ? WHERE reminder_id = ?",
+        # Conditional UPDATE: only transitions non-dismissed rows. If the row is
+        # already dismissed this is a no-op (rowcount == 0) → 409.
+        cursor = await db.execute(
+            "UPDATE life_reminders SET status = 'dismissed', dismissed_at = ? "
+            "WHERE reminder_id = ? AND status != 'dismissed'",
             (now, reminder_id),
         )
         await db.commit()
+
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=409, detail={"code": "already_dismissed"})
 
         cursor = await db.execute(
             "SELECT * FROM life_reminders WHERE reminder_id = ?", (reminder_id,)
@@ -1022,13 +1027,24 @@ async def open_bond_thread(request: BondThreadWriteRequest):
 
 
 @app.patch("/bond/threads/{thread_key}", response_model=BondThreadRecord)
-async def update_bond_thread(thread_key: str, request: BondThreadUpdateRequest):
-    """Update an existing bond thread (status, title, priority, description)."""
+async def update_bond_thread(
+    thread_key: str,
+    request: BondThreadUpdateRequest,
+    agent_id: str = Query(..., description="Owning companion agent id"),
+):
+    """Update an existing bond thread (status, title, priority, description).
+
+    agent_id is required to scope the lookup -- thread_keys are unique per agent.
+    """
+    if agent_id not in ("drevan", "cypher", "gaia"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
+
     now = datetime.now(timezone.utc).isoformat()
 
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT * FROM bond_threads WHERE thread_key = ?", (thread_key,)
+            "SELECT * FROM bond_threads WHERE thread_key = ? AND agent_id = ?",
+            (thread_key, agent_id),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -1042,16 +1058,17 @@ async def update_bond_thread(thread_key: str, request: BondThreadUpdateRequest):
                priority    = COALESCE(?, priority),
                source      = ?,
                updated_at  = ?
-               WHERE thread_key = ?""",
+               WHERE thread_key = ? AND agent_id = ?""",
             (
                 request.title, request.description, request.status, request.priority,
-                request.source, now, thread_key,
+                request.source, now, thread_key, agent_id,
             ),
         )
         await db.commit()
 
         cursor = await db.execute(
-            "SELECT * FROM bond_threads WHERE thread_key = ?", (thread_key,)
+            "SELECT * FROM bond_threads WHERE thread_key = ? AND agent_id = ?",
+            (thread_key, agent_id),
         )
         updated = await cursor.fetchone()
 

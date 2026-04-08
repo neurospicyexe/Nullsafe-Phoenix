@@ -210,10 +210,13 @@ class TestDatabaseModule:
 @pytest.fixture
 async def test_app(tmp_path):
     import services.webmind.database as db_module
+    original_path = db_module._DB_PATH
     db_module._DB_PATH = str(tmp_path / "test.db")
     await db_module.init_db()
     from services.webmind.main import app
-    return TestClient(app)
+    client = TestClient(app)
+    yield client
+    db_module._DB_PATH = original_path
 
 
 async def test_post_limbic_returns_201(test_app):
@@ -802,17 +805,19 @@ async def test_open_bond_thread_invalid_agent(test_app):
 async def test_update_bond_thread_status(test_app):
     create_resp = test_app.post("/bond/threads", json=_BOND_THREAD_PAYLOAD)
     thread_key = create_resp.json()["thread_key"]
-    update_resp = test_app.patch(f"/bond/threads/{thread_key}", json={
-        "status": "resolved", "updated_by": "agent", "source": "api"
-    })
+    update_resp = test_app.patch(
+        f"/bond/threads/{thread_key}?agent_id=drevan",
+        json={"status": "resolved", "updated_by": "agent", "source": "api"},
+    )
     assert update_resp.status_code == 200
     assert update_resp.json()["status"] == "resolved"
 
 
 async def test_update_bond_thread_not_found(test_app):
-    resp = test_app.patch("/bond/threads/nonexistent", json={
-        "status": "resolved", "updated_by": "agent", "source": "api"
-    })
+    resp = test_app.patch(
+        "/bond/threads/nonexistent?agent_id=drevan",
+        json={"status": "resolved", "updated_by": "agent", "source": "api"},
+    )
     assert resp.status_code == 404
 
 
