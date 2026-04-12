@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Phoenix is NOT the live system. It is the future target. The live companion suite is **Bigger Better Halseth (BBH)**, located at `C:\dev\Bigger_Better_Halseth`.
 
 **What's actually running right now:**
-- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0044. This IS the WebMind for the lean phase.
+- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0045. This IS the WebMind for the lean phase.
 - **nullsafe-second-brain** -- VPS MCP server. Obsidian vault synthesis, RAG, persona-feeder.
 - **nullsafe-discord** -- Railway deployment. Three live Discord bots (Drevan, Cypher, Gaia).
 - **nullsafe-plural-v2** -- Cloudflare Worker. SimplyPlural fronting integration.
@@ -22,15 +22,27 @@ The reliability kernel (Relay, Brain, Redis queues, Web UI) is complete and sits
 - `C:\dev\Bigger_Better_Halseth\CLAUDE.md` -- full BBH suite context, architecture decisions, what's live
 - `C:\dev\Bigger_Better_Halseth\docs\implementation-log.md` -- full history of what shipped and why
 
-**Current Heart Phase status:** Kernel complete. Heart Phase not yet built. See `PHOENIX_HEART_PHASE_PLAN.md` for the 7-slice plan. Nothing in `services/webmind/` here is live -- Halseth owns that surface until Phoenix absorbs it.
+**Current Heart Phase status:** Kernel complete. WebMind slices 2-6 shipped (session-handoffs, threads, orient/ground, reminders, Bond Layer, Autonomy v0, Growth Layer, structural hardening). Slice 7 (MCP Adapter surface) pending. Nothing in `services/webmind/` here is live -- Halseth owns that surface until Phoenix absorbs it.
 
 ---
+
+## Multi-Agent System Conventions
+
+When making changes to one identity/config file (e.g., Cypher), always check and apply the same changes to ALL sibling identity files (e.g., Drevan, Gaia, and any others in the same directory).
+
+## Project Scope
+
+When reviewing or fixing bugs across the multi-agent system, always scan ALL projects: Phoenix, Hearth, relay, discord_bot, and any archived directories. Never assume a directory doesn't exist without checking.
+
+## Testing
+
+After implementing any TypeScript changes, run the integration/unit tests before committing. If tests fail, fix all errors (including missing metadata fields, wrong types, empty block formatting) before marking the task complete.
 
 ## Project Overview
 
 Nullsafe Phoenix v2 is a reliability-first agent orchestration system built on strict architectural separation. Five microservices communicate via Redis queues and HTTP, enabling Discord bots to interact with AI agents running on a local workstation, with persistent mind/continuity state stored in WebMind.
 
-**Current Status**: Kernel complete. Heart Phase not yet started. See above for what is actually live.
+**Current Status**: Kernel complete. WebMind slices 2-6 complete (through Growth Layer + structural hardening). Slice 7 (MCP Adapter) pending. See above for what is actually live.
 
 **Planning Documents**:
 - [PHOENIX_HEART_PHASE_PLAN.md](PHOENIX_HEART_PHASE_PLAN.md) - Master Heart Phase plan (7 slices)
@@ -288,8 +300,8 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 - [services/discord_bot/config.py](services/discord_bot/config.py) - Bot configuration with per-agent settings
 - [services/discord_bot/outbox_consumer.py](services/discord_bot/outbox_consumer.py) - Outbox poller
 - [services/web_ui/main.py](services/web_ui/main.py) - Web UI FastAPI app
-- [services/webmind/main.py](services/webmind/main.py) - WebMind FastAPI app (stub endpoints, Slice 2)
-- [services/webmind/contracts.py](services/webmind/contracts.py) - WebMind Pydantic models (locked for Slice 2)
+- [services/webmind/main.py](services/webmind/main.py) - WebMind FastAPI app (Slices 2-6: orient, ground, handoffs, threads, reminders, bond, autonomy, growth)
+- [services/webmind/contracts.py](services/webmind/contracts.py) - WebMind Pydantic models
 - [services/webmind/config.py](services/webmind/config.py) - WebMind configuration
 - [pytest.ini](pytest.ini) - Test configuration with asyncio_mode=auto
 
@@ -303,7 +315,7 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 
 ### Testing & Validation
 - [scripts/smoke_test.ps1](scripts/smoke_test.ps1) - Comprehensive end-to-end smoke test (8 scenarios)
-- [services/webmind/tests/test_webmind.py](services/webmind/tests/test_webmind.py) - WebMind test scaffold (Slice 2)
+- [services/webmind/tests/test_webmind.py](services/webmind/tests/test_webmind.py) - WebMind tests: contracts, endpoints, cap/retention, and growth (Slices 2-6 + post-6 hardening; ~170 tests)
 
 ## Configuration
 
@@ -361,7 +373,15 @@ All services use environment variables with fail-fast validation and safe startu
 ## Phase Status
 
 Kernel complete (Relay, Brain, Redis queues, Discord bots stub, Web UI).
-Heart Phase not yet started -- planning docs exist but no Heart Phase code has shipped.
+WebMind Heart Phase slices shipped:
+- Slice 2: session-handoffs, threads, orient, ground
+- Slice 3: life reminders + housekeeping digest
+- Slice 4: Bond Layer (bond_threads, bond_handoffs, bond_notes, bond_state proxy)
+- Slice 5: Autonomy v0 (schedules, seeds, runs, logs, reflections)
+- Slice 6: Growth Layer with write-time retention
+- Post-6 hardening: caps, TTL, log levels, FK scope, allowlist rejection tests
+
+Pending: Slice 7 (MCP Adapter surface).
 The live system is BBH (see top of this file). Phoenix absorbs it when Heart Phase is ready (target: summer 2026).
 Details: `docs/phase-status.md` and `PHOENIX_HEART_PHASE_PLAN.md`.
 
