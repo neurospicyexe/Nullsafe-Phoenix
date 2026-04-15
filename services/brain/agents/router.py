@@ -9,6 +9,7 @@ Handles:
 - Identity-aware stub replies
 """
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from typing import Dict, Optional
 from shared.contracts import AgentReply, ThoughtPacket
 from services.brain.identity.loader import IdentityLoader
 from services.brain.inference_client import InferenceClient
+from services.brain.halseth_client import HalsethClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,13 @@ class AgentRouter:
         "gaia": re.compile(r"^gaia:\s*", re.IGNORECASE),
     }
 
-    def __init__(self, identity_loader: IdentityLoader, inference_client: Optional[InferenceClient] = None, orient_cache=None):
+    def __init__(
+        self,
+        identity_loader: IdentityLoader,
+        inference_client: Optional[InferenceClient] = None,
+        orient_cache=None,
+        halseth_client: Optional[HalsethClient] = None,
+    ):
         """
         Initialize agent router.
 
@@ -47,10 +55,12 @@ class AgentRouter:
             identity_loader: Identity loader for loading agent identities
             inference_client: Inference client for LLM completions (optional; falls back to stub)
             orient_cache: OrientCache instance for limbic context injection (optional)
+            halseth_client: Halseth client for post-response STM + note writes (optional)
         """
         self.identity_loader = identity_loader
         self.inference_client = inference_client
         self._orient_cache = orient_cache
+        self._halseth = halseth_client
         self._thread_routing: Dict[str, str] = {}  # thread_id -> active_agent_id
 
     def detect_override(self, message: str) -> tuple[str | None, str]:
@@ -142,17 +152,46 @@ class AgentRouter:
             f"Processing message for {active_agent_id} (identity version: {identity_version})"
         )
 
-        # Generate reply via inference or stub
+        # Generate reply via inference or stub.
+        # When the bot (Discord relay) sends a pre-assembled system_prompt and message history
+        # in metadata, use those directly -- the bot already applied identity + DISCORD_PREFIX +
+        # orient context. Otherwise fall back to identity-loader construction.
         if self.inference_client:
-            system_prompt = self.identity_loader.construct_prompt_context(identity)
-            # Inject limbic context if orient cache is available
-            if self._orient_cache:
-                limbic_block = await self._orient_cache.get(packet.thread_id, active_agent_id)
-                if limbic_block:
-                    system_prompt = system_prompt + "\n\n" + limbic_block
+            meta_system_prompt: Optional[str] = packet.metadata.get("system_prompt")
+            meta_messages: Optional[list] = packet.metadata.get("messages")
+            meta_temperature: float = float(packet.metadata.get("temperature", 0.7))
+
+            if meta_system_prompt and meta_messages is not None:
+                # Relay mode: use bot-assembled context as-is; skip identity loader + orient cache.
+                system_prompt = meta_system_prompt
+                messages = meta_messages + [{"role": "user", "content": cleaned_message}]
+                logger.debug(f"[{active_agent_id}] relay mode: using bot-assembled context ({len(messages)} msgs)")
+            else:
+                # Direct mode: build from identity loader + optional orient cache.
+                system_prompt = self.identity_loader.construct_prompt_context(identity)
+                if self._orient_cache:
+                    limbic_block = await self._orient_cache.get(packet.thread_id, active_agent_id)
+                    if limbic_block:
+                        system_prompt = system_prompt + "\n\n" + limbic_block
+                messages = None
+                meta_temperature = 0.7
+
             reply_text, backend = await self.inference_client.complete(
-                system_prompt, cleaned_message, active_agent_id
+                system_prompt,
+                cleaned_message,
+                active_agent_id,
+                messages=messages,
+                temperature=meta_temperature,
             )
+
+            # Post-response writes: fire-and-forget STM + companion note if Halseth is wired.
+            # Only runs in relay mode (bot sent pre-assembled context); direct mode has no
+            # channel_id context. These writes are non-blocking and non-fatal.
+            if self._halseth and meta_system_prompt:
+                channel_id = packet.metadata.get("channel_id") or packet.thread_id
+                asyncio.create_task(self._post_response_writes(
+                    channel_id, cleaned_message, reply_text, active_agent_id
+                ))
         else:
             reply_text = self._generate_stub_reply(identity, cleaned_message)
             backend = "stub"
@@ -179,6 +218,35 @@ class AgentRouter:
             reply_text=reply_text,
             trace={"repro_stamp": repro_stamp}
         )
+
+    async def _post_response_writes(
+        self,
+        channel_id: str,
+        user_message: str,
+        reply_text: str,
+        agent_id: str,
+    ) -> None:
+        """
+        Fire-and-forget Halseth writes after inference completes.
+        Writes STM entries (user + assistant) and a brief companion note.
+        Failures are logged but never raise.
+        """
+        try:
+            await self._halseth.stm_write(channel_id, "user", user_message)
+        except Exception as e:
+            logger.warning(f"[{agent_id}] STM user write failed: {e}")
+        try:
+            await self._halseth.stm_write(channel_id, "assistant", reply_text)
+        except Exception as e:
+            logger.warning(f"[{agent_id}] STM assistant write failed: {e}")
+        try:
+            # Brief note for orient continuity: what topic/register was active.
+            snippet = reply_text[:200].replace("\n", " ")
+            await self._halseth.add_companion_note(
+                f"[discord:brain] responded in channel {channel_id}: {snippet}"
+            )
+        except Exception as e:
+            logger.warning(f"[{agent_id}] companion note write failed: {e}")
 
     def _generate_stub_reply(self, identity, message: str) -> str:
         """

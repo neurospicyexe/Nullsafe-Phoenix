@@ -68,36 +68,54 @@ class InferenceClient:
         user_message: str,
         agent_id: str,
         model: Optional[str] = None,
+        messages: Optional[list] = None,
+        temperature: float = 0.7,
     ) -> tuple[str, str]:
         """
         Generate a completion. Tries each backend in order, returns on first success.
+
+        Args:
+            system_prompt: System prompt string.
+            user_message: Current user message (used when messages is None).
+            agent_id: Agent identifier for logging/stub fallback.
+            model: Optional model override.
+            messages: Optional list of {role, content} dicts (conversation history).
+                      When provided, replaces user_message -- history is used as-is.
+            temperature: Sampling temperature.
 
         Returns:
             (reply_text, backend_used)
         """
         if self._local_url:
-            result = await self._try_local(system_prompt, user_message, model)
+            result = await self._try_local(system_prompt, user_message, model, messages, temperature)
             if result is not None:
                 return result, "local"
 
         if self._deepseek_api_key:
-            result = await self._try_deepseek(system_prompt, user_message)
+            result = await self._try_deepseek(system_prompt, user_message, messages, temperature)
             if result is not None:
                 return result, "deepseek"
 
         logger.warning(f"[{agent_id}] All inference backends failed -- returning stub")
         return self._stub(agent_id), "stub"
 
+    def _build_messages(self, system_prompt: str, user_message: str, messages: Optional[list]) -> list:
+        """Build the messages array for an OpenAI-compatible request."""
+        if messages:
+            return [{"role": "system", "content": system_prompt}] + messages
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+
     async def _try_local(
-        self, system_prompt: str, user_message: str, model: Optional[str]
+        self, system_prompt: str, user_message: str, model: Optional[str],
+        messages: Optional[list] = None, temperature: float = 0.7,
     ) -> Optional[str]:
         url = f"{self._local_url}/chat/completions"
         payload = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            "temperature": 0.7,
+            "messages": self._build_messages(system_prompt, user_message, messages),
+            "temperature": temperature,
             "max_tokens": 1024,
         }
         if model:
@@ -113,16 +131,14 @@ class InferenceClient:
             return None
 
     async def _try_deepseek(
-        self, system_prompt: str, user_message: str
+        self, system_prompt: str, user_message: str,
+        messages: Optional[list] = None, temperature: float = 0.7,
     ) -> Optional[str]:
         url = f"{self._deepseek_base}/chat/completions"
         payload = {
             "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            "temperature": 0.7,
+            "messages": self._build_messages(system_prompt, user_message, messages),
+            "temperature": temperature,
             "max_tokens": 1024,
         }
         headers = {"Authorization": f"Bearer {self._deepseek_api_key}"}

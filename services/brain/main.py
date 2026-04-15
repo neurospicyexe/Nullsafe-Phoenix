@@ -78,28 +78,37 @@ _synthesis_loop = None
 async def lifespan(app):
     global _synthesis_loop, agent_router
 
-    # Setup webmind client
-    webmind_client = None
-    if Config.WEBMIND_URL:
-        webmind_client = WebMindClient(url=Config.WEBMIND_URL)
-
-    # Setup orient cache
-    orient_cache = OrientCache(webmind_client=webmind_client) if webmind_client else None
-
-    # Re-initialize agent_router with orient_cache
-    agent_router = AgentRouter(
-        identity_loader,
-        inference_client=_inference_client,
-        orient_cache=orient_cache,
-    )
-
-    # Start synthesis loop if fully configured
-    if Config.SYNTHESIS_ENABLED and _inference_client and Config.HALSETH_URL and webmind_client:
+    # Setup Halseth client (shared by router post-response writes + synthesis loop).
+    # WEBMIND_URL defaults to Halseth URL so OrientCache reads from the live data backend.
+    halseth_client = None
+    if Config.HALSETH_URL:
         halseth_client = HalsethClient(
             url=Config.HALSETH_URL,
             secret=Config.HALSETH_ADMIN_SECRET or "",
             companion_id="cypher",
         )
+        logger.info(f"[brain] Halseth client ready: {Config.HALSETH_URL}")
+
+    # Setup webmind client -- point at Halseth URL when no separate WebMind is running.
+    # Halseth exposes the same /mind/* endpoints as Phoenix WebMind.
+    webmind_url = Config.WEBMIND_URL or Config.HALSETH_URL
+    webmind_client = None
+    if webmind_url:
+        webmind_client = WebMindClient(url=webmind_url)
+
+    # Setup orient cache
+    orient_cache = OrientCache(webmind_client=webmind_client) if webmind_client else None
+
+    # Re-initialize agent_router with orient_cache + Halseth client
+    agent_router = AgentRouter(
+        identity_loader,
+        inference_client=_inference_client,
+        orient_cache=orient_cache,
+        halseth_client=halseth_client,
+    )
+
+    # Start synthesis loop if fully configured
+    if Config.SYNTHESIS_ENABLED and _inference_client and halseth_client and webmind_client:
         _synthesis_loop = SynthesisLoop(
             halseth_client=halseth_client,
             inference_client=_inference_client,
@@ -114,10 +123,10 @@ async def lifespan(app):
             reasons.append("SYNTHESIS_ENABLED=false")
         if not _inference_client:
             reasons.append("no inference backend")
-        if not Config.HALSETH_URL:
+        if not halseth_client:
             reasons.append("HALSETH_URL not set")
         if not webmind_client:
-            reasons.append("WEBMIND_URL not set")
+            reasons.append("no WebMind/Halseth URL")
         logger.info(f"[synthesis] Loop not started: {', '.join(reasons)}")
 
     yield
