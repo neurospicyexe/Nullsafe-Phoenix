@@ -158,13 +158,20 @@ class AgentRouter:
         # orient context. Otherwise fall back to identity-loader construction.
         if self.inference_client:
             meta_system_prompt: Optional[str] = packet.metadata.get("system_prompt")
-            meta_messages: Optional[list] = packet.metadata.get("messages")
-            meta_temperature: float = float(packet.metadata.get("temperature", 0.7))
+            raw_messages = packet.metadata.get("messages")
+            meta_messages: Optional[list] = raw_messages if isinstance(raw_messages, list) else None
+            try:
+                meta_temperature: float = float(packet.metadata.get("temperature", 0.7))
+            except (TypeError, ValueError):
+                meta_temperature = 0.7
 
             if meta_system_prompt and meta_messages is not None:
-                # Relay mode: use bot-assembled context as-is; skip identity loader + orient cache.
+                # Relay mode: use bot-assembled context; skip identity loader + orient cache.
+                # meta_messages[-1] is the current user message (bot appended it before calling Brain).
+                # Replace it with cleaned_message so override prefixes ("Cypher: ...") are stripped.
                 system_prompt = meta_system_prompt
-                messages = meta_messages + [{"role": "user", "content": cleaned_message}]
+                prior_history = meta_messages[:-1] if meta_messages else []
+                messages = prior_history + [{"role": "user", "content": cleaned_message}]
                 logger.debug(f"[{active_agent_id}] relay mode: using bot-assembled context ({len(messages)} msgs)")
             else:
                 # Direct mode: build from identity loader + optional orient cache.
@@ -228,19 +235,12 @@ class AgentRouter:
     ) -> None:
         """
         Fire-and-forget Halseth writes after inference completes.
-        Writes STM entries (user + assistant) and a brief companion note.
-        Failures are logged but never raise.
+
+        STM persistence (user + assistant turns) is handled bot-side via StmStore.
+        Brain only writes a companion_note for orient continuity -- this is additive
+        and safe to do from both sides without creating duplicates.
         """
         try:
-            await self._halseth.stm_write(channel_id, "user", user_message)
-        except Exception as e:
-            logger.warning(f"[{agent_id}] STM user write failed: {e}")
-        try:
-            await self._halseth.stm_write(channel_id, "assistant", reply_text)
-        except Exception as e:
-            logger.warning(f"[{agent_id}] STM assistant write failed: {e}")
-        try:
-            # Brief note for orient continuity: what topic/register was active.
             snippet = reply_text[:200].replace("\n", " ")
             await self._halseth.add_companion_note(
                 f"[discord:brain] responded in channel {channel_id}: {snippet}"
