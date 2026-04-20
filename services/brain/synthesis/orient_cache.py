@@ -46,6 +46,28 @@ def _format_limbic_block(orient: dict, agent_id: str) -> str:
     if companion_note:
         lines.append(f"\n[COMPANION NOTE FOR YOU]\n{companion_note}")
 
+    # Worldview -- active beliefs
+    active_conclusions = orient.get("active_conclusions") or []
+    if active_conclusions:
+        conclusion_lines = []
+        for c in active_conclusions:
+            subj = f" (re: {c['subject']})" if c.get("subject") else ""
+            confidence = float(c.get("confidence") or 0)
+            conclusion_lines.append(
+                f"[{c.get('belief_type', '?')}] \"{c.get('conclusion_text', '')}\"{subj}"
+                f" (confidence: {confidence:.2f})"
+            )
+        lines.append("\n[Worldview -- active beliefs]\n" + "\n".join(conclusion_lines))
+
+    # Flagged beliefs -- contradiction signal
+    flagged_beliefs = orient.get("flagged_beliefs") or []
+    if flagged_beliefs:
+        flagged_lines = [
+            f"[?] [{c.get('belief_type', '?')}] \"{c.get('conclusion_text', '')}\""
+            for c in flagged_beliefs
+        ]
+        lines.append("\n[Flagged Beliefs -- review signal]\n" + "\n".join(flagged_lines))
+
     if not lines:
         return ""
 
