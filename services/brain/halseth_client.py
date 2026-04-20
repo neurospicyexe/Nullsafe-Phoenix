@@ -291,15 +291,36 @@ class HalsethClient:
             logger.warning(f"[halseth] write_continuity_note failed: {e}")
             return None
 
-    async def write_conclusion(self, companion_id: str, conclusion_text: str) -> Optional[dict]:
+    async def write_conclusion(
+        self,
+        companion_id: str,
+        conclusion_text: str,
+        confidence: float = 0.7,
+        belief_type: str = "self",
+        subject: Optional[str] = None,
+        provenance: Optional[str] = None,
+    ) -> Optional[dict]:
         """POST /companion-conclusions -- write a resolved conclusion."""
+        VALID_BELIEF_TYPES = {"self", "observational", "relational", "systemic"}
+        if belief_type not in VALID_BELIEF_TYPES:
+            logger.warning(f"write_conclusion: invalid belief_type '{belief_type}', defaulting to 'self'")
+            belief_type = "self"
+
+        body: dict = {
+            "companion_id": companion_id,
+            "conclusion_text": conclusion_text,
+            "confidence": confidence,
+            "belief_type": belief_type,
+        }
+        if subject is not None:
+            body["subject"] = subject
+        if provenance is not None:
+            body["provenance"] = provenance
+
         try:
             res = await self._client.post(
                 f"{self.url}/companion-conclusions",
-                json={
-                    "companion_id": companion_id,
-                    "conclusion_text": conclusion_text,
-                },
+                json=body,
                 headers={"Authorization": f"Bearer {self.secret}"},
             )
             if res.status_code >= 300:
