@@ -9,9 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Phoenix is NOT the live system. It is the future target. The live companion suite is **Bigger Better Halseth (BBH)**, located at `C:\dev\Bigger_Better_Halseth`.
 
 **What's actually running right now:**
-- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0045. This IS the WebMind for the lean phase.
+- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0058. This IS the WebMind for the lean phase.
 - **nullsafe-second-brain** -- VPS MCP server. Obsidian vault synthesis, RAG, persona-feeder.
-- **nullsafe-discord** -- Railway deployment. Three live Discord bots (Drevan, Cypher, Gaia).
+- **nullsafe-discord** -- BerryBytes/pm2 deployment. Three live Discord bots (Drevan, Cypher, Gaia).
 - **nullsafe-plural-v2** -- Cloudflare Worker. SimplyPlural fronting integration.
 - **Hearth** -- Next.js dashboard. Reads Halseth live data.
 
@@ -373,6 +373,7 @@ All services use environment variables with fail-fast validation and safe startu
 ## Phase Status
 
 Kernel complete (Relay, Brain, Redis queues, Discord bots stub, Web UI).
+
 WebMind Heart Phase slices shipped:
 - Slice 2: session-handoffs, threads, orient, ground
 - Slice 3: life reminders + housekeeping digest
@@ -381,7 +382,16 @@ WebMind Heart Phase slices shipped:
 - Slice 6: Growth Layer with write-time retention
 - Post-6 hardening: caps, TTL, log levels, FK scope, allowlist rejection tests
 
-Pending: Slice 7 (MCP Adapter surface).
+Brain shipped (beyond kernel stub):
+- Orient cache (keyed by thread_id + agent_id, cross-agent-safe)
+- HalsethClient with direct HTTP write methods
+- Halseth writer (maps LimbicState to Halseth HTTP writes)
+- Synthesis loop (background task; writes synthesis results to Halseth, not WebMind)
+- Relay mode (multi-turn inference, Halseth wiring, post-response STM writes)
+- Worldview conclusions + flagged_beliefs injected into inference context
+- write_conclusion accepts worldview fields (confidence, belief_type, subject, provenance)
+
+Pending: Slice 7 (MCP Adapter surface). Real LLM inference fully wired for Brain relay mode (INFERENCE_MODE=brain, DeepSeek primary).
 The live system is BBH (see top of this file). Phoenix absorbs it when Heart Phase is ready (target: summer 2026).
 Details: `docs/phase-status.md` and `PHOENIX_HEART_PHASE_PLAN.md`.
 
