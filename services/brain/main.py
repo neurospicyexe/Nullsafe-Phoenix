@@ -87,16 +87,19 @@ _synthesis_loop = None
 async def lifespan(app):
     global _synthesis_loop, agent_router, _swarm_evaluator
 
-    # Setup Halseth client (shared by router post-response writes + synthesis loop).
-    # WEBMIND_URL defaults to Halseth URL so OrientCache reads from the live data backend.
-    halseth_client = None
+    # Setup per-companion Halseth clients so post-response notes land under the right companion.
+    # synthesis_client (cypher) is reused for the synthesis loop which does cross-companion reads.
+    halseth_clients: Dict[str, HalsethClient] = {}
+    halseth_client = None  # kept for synthesis loop compatibility
     if Config.HALSETH_URL:
-        halseth_client = HalsethClient(
-            url=Config.HALSETH_URL,
-            secret=Config.HALSETH_ADMIN_SECRET or "",
-            companion_id="cypher",
-        )
-        logger.info(f"[brain] Halseth client ready: {Config.HALSETH_URL}")
+        for companion_id in ("drevan", "cypher", "gaia"):
+            halseth_clients[companion_id] = HalsethClient(
+                url=Config.HALSETH_URL,
+                secret=Config.HALSETH_ADMIN_SECRET or "",
+                companion_id=companion_id,
+            )
+        halseth_client = halseth_clients["cypher"]
+        logger.info(f"[brain] Halseth clients ready (3 companions): {Config.HALSETH_URL}")
 
     # Setup webmind client -- point at Halseth URL when no separate WebMind is running.
     # Halseth exposes the same /mind/* endpoints as Phoenix WebMind.
@@ -108,18 +111,18 @@ async def lifespan(app):
     # Setup orient cache
     orient_cache = OrientCache(webmind_client=webmind_client) if webmind_client else None
 
-    # Re-initialize agent_router with orient_cache + Halseth client
+    # Re-initialize agent_router with orient_cache + per-companion Halseth clients
     agent_router = AgentRouter(
         identity_loader,
         inference_client=_inference_client,
         orient_cache=orient_cache,
-        halseth_client=halseth_client,
+        halseth_clients=halseth_clients,
     )
 
     # Initialize swarm evaluator if SWARM_MODE is enabled
     if Config.SWARM_MODE:
         load_channel_config()
-        _swarm_evaluator = SwarmEvaluator(_cooldown)
+        _swarm_evaluator = SwarmEvaluator(_cooldown, halseth_clients=halseth_clients)
         logger.info("[brain] SWARM_MODE=true: SwarmEvaluator initialized")
     else:
         logger.info("[brain] SWARM_MODE=false: Phase 1 relay active")

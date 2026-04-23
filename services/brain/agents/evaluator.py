@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import httpx
 from shared.contracts import SwarmReply, ThoughtPacket
 from services.brain.config.channel_config import get_companions_for_channel
 from services.brain.agents.cooldown import CompanionCooldown
+from services.brain.halseth_client import HalsethClient
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +35,13 @@ VOICE_SUMMARIES: Dict[str, str] = {
 
 
 class SwarmEvaluator:
-    def __init__(self, cooldown: CompanionCooldown) -> None:
+    def __init__(
+        self,
+        cooldown: CompanionCooldown,
+        halseth_clients: Optional[Dict[str, HalsethClient]] = None,
+    ) -> None:
         self._cooldown = cooldown
+        self._halseth_clients: Dict[str, HalsethClient] = halseth_clients or {}
         self._api_key = os.environ["DEEPSEEK_API_KEY"]
         self._model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
@@ -56,6 +63,13 @@ class SwarmEvaluator:
         responses = self._parse_responses(raw, companions)
         responses = self._cooldown.apply(responses, channel_id)
 
+        if self._halseth_clients:
+            for companion_id, reply_text in responses.items():
+                if reply_text:
+                    asyncio.create_task(self._write_companion_note(
+                        companion_id, channel_id, reply_text
+                    ))
+
         return SwarmReply(
             packet_id=packet.packet_id,
             thread_id=packet.thread_id,
@@ -63,6 +77,20 @@ class SwarmEvaluator:
             depth=packet.depth,
             trace={"raw_response_length": len(raw)},
         )
+
+    async def _write_companion_note(
+        self, companion_id: str, channel_id: str, reply_text: str
+    ) -> None:
+        client = self._halseth_clients.get(companion_id)
+        if not client:
+            return
+        try:
+            snippet = reply_text[:200].replace("\n", " ")
+            await client.add_companion_note(
+                f"[discord:swarm] responded in channel {channel_id}: {snippet}"
+            )
+        except Exception as e:
+            logger.warning(f"[{companion_id}] swarm companion note write failed: {e}")
 
     def _build_prompt(self, packet: ThoughtPacket, companions: List[str]) -> str:
         history: List[Dict[str, Any]] = packet.metadata.get("history", [])
