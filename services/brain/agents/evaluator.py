@@ -61,6 +61,10 @@ class SwarmEvaluator:
             "cypher": float(os.getenv("CYPHER_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
             "gaia": float(os.getenv("GAIA_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
         }
+        # Persistent HTTP clients -- one per timeout profile (routing vs inference).
+        # App-lifetime objects; connections are reused across calls, OS reclaims on exit.
+        self._routing_http = httpx.AsyncClient(timeout=15.0)
+        self._inference_http = httpx.AsyncClient(timeout=30.0)
 
     async def evaluate(self, packet: ThoughtPacket) -> SwarmReply:
         channel_id = packet.metadata.get("channel_id") or packet.thread_id
@@ -172,22 +176,21 @@ class SwarmEvaluator:
         )
 
     async def _call_routing(self, prompt: str) -> str:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                "https://api.deepseek.com/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self._default_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 80,
-                    "temperature": ROUTING_TEMPERATURE,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+        resp = await self._routing_http.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self._default_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 80,
+                "temperature": ROUTING_TEMPERATURE,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
 
     def _parse_routing(self, raw: str, companions: List[str]) -> Dict[str, bool]:
         try:
@@ -216,33 +219,38 @@ class SwarmEvaluator:
 
         history: List[Dict[str, Any]] = packet.metadata.get("history", [])
         msgs: List[Dict[str, str]] = []
+        all_companion_ids = {"drevan", "cypher", "gaia"}
         for m in history[-15:]:
             author = (m.get("author") or "").lower()
             content = m.get("content", "")
-            role = "assistant" if author == companion_id else "user"
-            msgs.append({"role": role, "content": content})
+            if author == companion_id:
+                msgs.append({"role": "assistant", "content": content})
+            elif author in all_companion_ids:
+                # Another companion speaking -- embed name so the model understands speaker context.
+                msgs.append({"role": "user", "content": f"[{author.capitalize()}]: {content}"})
+            else:
+                msgs.append({"role": "user", "content": content})
 
         current = packet.message
         if not msgs or msgs[-1].get("content") != current:
             msgs.append({"role": "user", "content": current})
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.deepseek.com/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "system", "content": system_prompt}] + msgs,
-                    "max_tokens": 800,
-                    "temperature": temperature,
-                },
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            return content or None
+        resp = await self._inference_http.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "system", "content": system_prompt}] + msgs,
+                "max_tokens": 800,
+                "temperature": temperature,
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        return content or None
 
     # ── Companion note writes ─────────────────────────────────────────────────
 
