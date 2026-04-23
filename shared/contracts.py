@@ -34,6 +34,10 @@ class ThoughtPacket(BaseModel):
     lane: Optional[str] = Field(None, description="Processing lane: immersion|praxis|translation|research")
     policy_profile: Optional[str] = Field("safe_default", description="Policy profile for this interaction")
     priority: Optional[int] = Field(5, description="Priority level (1-10)")
+    # Phase 2 swarm fields
+    author: str = Field("Raziel", description="Message author (system member name if PluralKit)")
+    author_is_companion: bool = Field(False, description="True when another companion triggered this packet")
+    depth: int = Field(0, description="Companion-to-companion chain depth (anti-loop counter)")
     trace: Optional[Dict[str, Any]] = Field(None, description="Debug trace information")
 
     @field_validator("packet_id")
@@ -113,6 +117,24 @@ class AgentReply(BaseModel):
     def from_json(cls, json_str: str) -> 'AgentReply':
         """Deserialize from JSON string."""
         return cls.model_validate_json(json_str)
+
+
+class SwarmReply(BaseModel):
+    """
+    Phase 2 response: per-companion replies from SwarmEvaluator.
+    Each value is the companion's response text, or None if they are silent.
+    """
+    packet_id: str = Field(..., description="Echo back packet_id from request")
+    thread_id: str = Field(..., description="Thread/channel ID from request")
+    responses: Dict[str, Optional[str]] = Field(
+        ..., description="Companion -> reply text or None"
+    )
+    depth: int = Field(0, description="Chain depth at time of evaluation")
+    status: Literal["ok", "error"] = Field("ok", description="Evaluation status")
+    trace: Optional[Dict[str, Any]] = Field(None, description="Debug trace")
+
+    def to_json(self) -> str:
+        return self.model_dump_json()
 
 
 # Queue envelope for retry tracking
