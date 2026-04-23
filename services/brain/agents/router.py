@@ -46,7 +46,7 @@ class AgentRouter:
         identity_loader: IdentityLoader,
         inference_client: Optional[InferenceClient] = None,
         orient_cache=None,
-        halseth_client: Optional[HalsethClient] = None,
+        halseth_clients: Optional[Dict[str, HalsethClient]] = None,
     ):
         """
         Initialize agent router.
@@ -55,12 +55,12 @@ class AgentRouter:
             identity_loader: Identity loader for loading agent identities
             inference_client: Inference client for LLM completions (optional; falls back to stub)
             orient_cache: OrientCache instance for limbic context injection (optional)
-            halseth_client: Halseth client for post-response STM + note writes (optional)
+            halseth_clients: Per-companion Halseth clients for post-response note writes (optional)
         """
         self.identity_loader = identity_loader
         self.inference_client = inference_client
         self._orient_cache = orient_cache
-        self._halseth = halseth_client
+        self._halseth_clients: Dict[str, HalsethClient] = halseth_clients or {}
         self._thread_routing: Dict[str, str] = {}  # thread_id -> active_agent_id
 
     def detect_override(self, message: str) -> tuple[str | None, str]:
@@ -194,7 +194,7 @@ class AgentRouter:
             # Post-response writes: fire-and-forget STM + companion note if Halseth is wired.
             # Only runs in relay mode (bot sent pre-assembled context); direct mode has no
             # channel_id context. These writes are non-blocking and non-fatal.
-            if self._halseth and meta_system_prompt:
+            if self._halseth_clients and meta_system_prompt:
                 channel_id = packet.metadata.get("channel_id") or packet.thread_id
                 asyncio.create_task(self._post_response_writes(
                     channel_id, cleaned_message, reply_text, active_agent_id
@@ -240,9 +240,12 @@ class AgentRouter:
         Brain only writes a companion_note for orient continuity -- this is additive
         and safe to do from both sides without creating duplicates.
         """
+        client = self._halseth_clients.get(agent_id)
+        if not client:
+            return
         try:
             snippet = reply_text[:200].replace("\n", " ")
-            await self._halseth.add_companion_note(
+            await client.add_companion_note(
                 f"[discord:brain] responded in channel {channel_id}: {snippet}"
             )
         except Exception as e:
