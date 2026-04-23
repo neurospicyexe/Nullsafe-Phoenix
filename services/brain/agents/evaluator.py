@@ -56,6 +56,11 @@ class SwarmEvaluator:
             "cypher": os.getenv("CYPHER_MODEL") or self._default_model,
             "gaia": os.getenv("GAIA_MODEL") or self._default_model,
         }
+        self._companion_temps = {
+            "drevan": float(os.getenv("DREVAN_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
+            "cypher": float(os.getenv("CYPHER_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
+            "gaia": float(os.getenv("GAIA_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
+        }
 
     async def evaluate(self, packet: ThoughtPacket) -> SwarmReply:
         channel_id = packet.metadata.get("channel_id") or packet.thread_id
@@ -207,6 +212,7 @@ class SwarmEvaluator:
         identity, _ = self._identity_loader.load_identity(companion_id)  # type: ignore[union-attr]
         system_prompt = self._identity_loader.construct_prompt_context(identity)  # type: ignore[union-attr]
         model = self._companion_models.get(companion_id, self._default_model)
+        temperature = self._companion_temps.get(companion_id, INFERENCE_TEMPERATURE)
 
         history: List[Dict[str, Any]] = packet.metadata.get("history", [])
         msgs: List[Dict[str, str]] = []
@@ -231,7 +237,7 @@ class SwarmEvaluator:
                     "model": model,
                     "messages": [{"role": "system", "content": system_prompt}] + msgs,
                     "max_tokens": 800,
-                    "temperature": INFERENCE_TEMPERATURE,
+                    "temperature": temperature,
                 },
             )
             resp.raise_for_status()
