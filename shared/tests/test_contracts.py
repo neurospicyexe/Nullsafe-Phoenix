@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from shared.contracts import AgentReply, QueueEnvelope, ThoughtPacket
+from shared.contracts import AgentReply, QueueEnvelope, SwarmReply, ThoughtPacket
 
 
 class TestThoughtPacket:
@@ -398,3 +398,50 @@ class TestContractIntegration:
         # Simulate retry
         envelope.attempts += 1
         assert envelope.attempts == 1
+
+
+def test_swarm_reply_valid():
+    reply = SwarmReply(
+        packet_id="550e8400-e29b-41d4-a716-446655440000",
+        thread_id="ch123",
+        responses={"drevan": "Hello", "cypher": None, "gaia": "Witness."},
+        depth=0,
+    )
+    assert reply.responses["cypher"] is None
+    assert reply.status == "ok"
+
+
+def test_thought_packet_swarm_fields():
+    import uuid, datetime
+    packet = ThoughtPacket(
+        packet_id=str(uuid.uuid4()),
+        timestamp=datetime.datetime.utcnow().isoformat(),
+        source="discord",
+        user_id="u1",
+        thread_id="ch1",
+        agent_id="cypher",
+        message="hello",
+        metadata={"channel_id": "ch1"},
+        author="Blue",
+        author_is_companion=False,
+        depth=1,
+    )
+    assert packet.author == "Blue"
+    assert packet.depth == 1
+
+
+def test_thought_packet_author_defaults():
+    import uuid, datetime
+    packet = ThoughtPacket(
+        packet_id=str(uuid.uuid4()),
+        timestamp=datetime.datetime.utcnow().isoformat(),
+        source="discord",
+        user_id="u1",
+        thread_id="ch1",
+        agent_id="cypher",
+        message="hello",
+        metadata={"channel_id": "ch1"},
+    )
+    assert packet.author == "Raziel"
+    assert packet.author_is_companion is False
+    assert packet.depth == 0
