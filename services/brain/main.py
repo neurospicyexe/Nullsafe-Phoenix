@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from typing import Dict, Union
 
 from dotenv import load_dotenv
+# Must run before any service imports -- Config evaluates class vars at import time
+load_dotenv(".env.brain", override=True)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -32,9 +35,6 @@ from services.brain.halseth_client import HalsethClient
 from services.brain.webmind_client import WebMindClient
 from services.brain.synthesis.loop import SynthesisLoop
 from services.brain.synthesis.orient_cache import OrientCache
-
-# Load environment variables
-load_dotenv(".env.brain")
 
 # Configure logging
 logging.basicConfig(
