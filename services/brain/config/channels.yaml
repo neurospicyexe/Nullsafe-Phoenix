@@ -1,0 +1,11 @@
+# Maps Discord channel_id -> active companions.
+# Unconfigured channels get the default (all three companions).
+
+defaults:
+  companions: [drevan, cypher, gaia]
+
+channels: {}
+  # Uncomment and fill channel IDs to restrict:
+  # "1234567890123456789":
+  #   companions: [drevan]
+  #   label: "drevan-intimate"
