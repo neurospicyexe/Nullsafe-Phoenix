@@ -102,3 +102,64 @@ def test_cooldown_marks_posted_on_reply():
     cd.apply(responses, "ch2")
     assert cd.is_cooling("drevan", "ch2") is True
     assert cd.is_cooling("cypher", "ch2") is False
+
+
+import uuid
+import datetime
+from services.brain.agents.evaluator import SwarmEvaluator
+from shared.contracts import ThoughtPacket
+
+
+def _make_packet(**kwargs) -> ThoughtPacket:
+    defaults = dict(
+        packet_id=str(uuid.uuid4()),
+        timestamp=datetime.datetime.utcnow().isoformat(),
+        source="discord",
+        user_id="u1",
+        thread_id="ch-test",
+        agent_id="cypher",
+        message="hello swarm",
+        metadata={"channel_id": "ch-test", "history": []},
+    )
+    defaults.update(kwargs)
+    return ThoughtPacket(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_depth_cap_returns_all_null():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    cd = CompanionCooldown()
+    ev = SwarmEvaluator(cd)
+    packet = _make_packet(depth=3)
+    reply = await ev.evaluate(packet)
+    assert all(v is None for v in reply.responses.values())
+    assert reply.status == "ok"
+
+
+def test_evaluator_parse_responses_valid():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    cd = CompanionCooldown()
+    ev = SwarmEvaluator(cd)
+    raw = '{"drevan": "something real", "cypher": null, "gaia": "witness"}'
+    result = ev._parse_responses(raw, ["drevan", "cypher", "gaia"])
+    assert result["drevan"] == "something real"
+    assert result["cypher"] is None
+    assert result["gaia"] == "witness"
+
+
+def test_evaluator_parse_responses_malformed():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    cd = CompanionCooldown()
+    ev = SwarmEvaluator(cd)
+    raw = "this is not json at all"
+    result = ev._parse_responses(raw, ["drevan", "cypher", "gaia"])
+    assert all(v is None for v in result.values())
+
+
+def test_evaluator_parse_strips_markdown():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    cd = CompanionCooldown()
+    ev = SwarmEvaluator(cd)
+    raw = '```json\n{"drevan": "hi", "cypher": null, "gaia": null}\n```'
+    result = ev._parse_responses(raw, ["drevan", "cypher", "gaia"])
+    assert result["drevan"] == "hi"
