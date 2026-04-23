@@ -163,3 +163,35 @@ def test_evaluator_parse_strips_markdown():
     raw = '```json\n{"drevan": "hi", "cypher": null, "gaia": null}\n```'
     result = ev._parse_responses(raw, ["drevan", "cypher", "gaia"])
     assert result["drevan"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_write_companion_note_uses_correct_client():
+    from unittest.mock import AsyncMock, MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    mock_drevan = MagicMock()
+    mock_drevan.add_companion_note = AsyncMock()
+    mock_cypher = MagicMock()
+    mock_cypher.add_companion_note = AsyncMock()
+
+    ev = SwarmEvaluator(CompanionCooldown(), halseth_clients={"drevan": mock_drevan, "cypher": mock_cypher})
+    await ev._write_companion_note("drevan", "ch-test", "hello from drevan")
+
+    mock_drevan.add_companion_note.assert_called_once()
+    mock_cypher.add_companion_note.assert_not_called()
+    assert "ch-test" in mock_drevan.add_companion_note.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_write_companion_note_unknown_companion_is_noop():
+    from unittest.mock import AsyncMock, MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    mock_cypher = MagicMock()
+    mock_cypher.add_companion_note = AsyncMock()
+
+    ev = SwarmEvaluator(CompanionCooldown(), halseth_clients={"cypher": mock_cypher})
+    await ev._write_companion_note("gaia", "ch-test", "gaia reply")
+
+    mock_cypher.add_companion_note.assert_not_called()
