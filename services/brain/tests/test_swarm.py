@@ -195,3 +195,91 @@ async def test_write_companion_note_unknown_companion_is_noop():
     await ev._write_companion_note("gaia", "ch-test", "gaia reply")
 
     mock_cypher.add_companion_note.assert_not_called()
+
+
+# ── Slice B: routing split tests ──────────────────────────────────────────────
+
+def test_parse_routing_valid():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher", "gaia"]
+    raw = '{"drevan": true, "cypher": false, "gaia": true}'
+    result = ev._parse_routing(raw, companions)
+    assert result == {"drevan": True, "cypher": False, "gaia": True}
+
+
+def test_parse_routing_malformed_fails_open():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher", "gaia"]
+    result = ev._parse_routing("not json at all", companions)
+    assert all(v is True for v in result.values())
+
+
+def test_parse_routing_strips_markdown():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher"]
+    raw = '```json\n{"drevan": true, "cypher": false}\n```'
+    result = ev._parse_routing(raw, companions)
+    assert result == {"drevan": True, "cypher": False}
+
+
+@pytest.mark.asyncio
+async def test_routing_silenced_companion_skips_inference():
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    cd = CompanionCooldown(cooldown_s=60.0)
+    cd.mark_posted("drevan", "ch-test")  # drevan on cooldown
+
+    ev = SwarmEvaluator(cd, identity_loader=MagicMock())
+
+    inference_calls = []
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": false, "gaia": true}'
+
+    async def fake_infer(companion_id, pkt):
+        inference_calls.append(companion_id)
+        return f"{companion_id} reply"
+
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    packet = _make_packet()
+    reply = await ev.evaluate(packet)
+
+    # drevan cooled, cypher routed false -- only gaia should infer
+    assert "drevan" not in inference_calls
+    assert "cypher" not in inference_calls
+    assert "gaia" in inference_calls
+    assert reply.responses["drevan"] is None
+    assert reply.responses["cypher"] is None
+    assert reply.responses["gaia"] == "gaia reply"
+
+
+@pytest.mark.asyncio
+async def test_inference_exception_doesnt_blank_others():
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    ev = SwarmEvaluator(CompanionCooldown(), identity_loader=MagicMock())
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": true}'
+
+    async def fake_infer(companion_id, pkt):
+        if companion_id == "cypher":
+            raise RuntimeError("API timeout")
+        return f"{companion_id} reply"
+
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    packet = _make_packet()
+    reply = await ev.evaluate(packet)
+
+    assert reply.responses["drevan"] == "drevan reply"
+    assert reply.responses["cypher"] is None  # exception -> None
+    assert reply.responses["gaia"] == "gaia reply"

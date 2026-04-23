@@ -122,7 +122,11 @@ async def lifespan(app):
     # Initialize swarm evaluator if SWARM_MODE is enabled
     if Config.SWARM_MODE:
         load_channel_config()
-        _swarm_evaluator = SwarmEvaluator(_cooldown, halseth_clients=halseth_clients)
+        _swarm_evaluator = SwarmEvaluator(
+            _cooldown,
+            halseth_clients=halseth_clients,
+            identity_loader=identity_loader,
+        )
         logger.info("[brain] SWARM_MODE=true: SwarmEvaluator initialized")
     else:
         logger.info("[brain] SWARM_MODE=false: Phase 1 relay active")

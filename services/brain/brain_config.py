@@ -41,6 +41,16 @@ class Config:
     # Phase 2 swarm mode
     SWARM_MODE: bool = os.getenv("SWARM_MODE", "false").lower() == "true"
 
+    # Slice B: per-companion model overrides (fall back to DEEPSEEK_MODEL)
+    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    CYPHER_MODEL: Optional[str] = os.getenv("CYPHER_MODEL")
+    DREVAN_MODEL: Optional[str] = os.getenv("DREVAN_MODEL")
+    GAIA_MODEL: Optional[str] = os.getenv("GAIA_MODEL")
+
+    # Slice B: swarm temperatures
+    ROUTING_TEMPERATURE: float = float(os.getenv("ROUTING_TEMPERATURE", "0.3"))
+    INFERENCE_TEMPERATURE: float = float(os.getenv("INFERENCE_TEMPERATURE", "1.3"))
+
     @staticmethod
     def validate():
         """Validate required config on startup."""
@@ -87,4 +97,9 @@ class Config:
         print(f"  Synthesis enabled: {Config.SYNTHESIS_ENABLED}")
         print(f"  Synthesis interval: {Config.SYNTHESIS_INTERVAL}s")
         print(f"  SWARM_MODE: {Config.SWARM_MODE}")
+        print(f"  Default model: {Config.DEEPSEEK_MODEL}")
+        print(f"  Cypher model: {Config.CYPHER_MODEL or '(default)'}")
+        print(f"  Drevan model: {Config.DREVAN_MODEL or '(default)'}")
+        print(f"  Gaia model: {Config.GAIA_MODEL or '(default)'}")
+        print(f"  Routing temp: {Config.ROUTING_TEMPERATURE} / Inference temp: {Config.INFERENCE_TEMPERATURE}")
         print("=" * 60)

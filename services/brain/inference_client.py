@@ -92,7 +92,7 @@ class InferenceClient:
                 return result, "local"
 
         if self._deepseek_api_key:
-            result = await self._try_deepseek(system_prompt, user_message, messages, temperature)
+            result = await self._try_deepseek(system_prompt, user_message, messages, temperature, model=model)
             if result is not None:
                 return result, "deepseek"
 
@@ -133,10 +133,11 @@ class InferenceClient:
     async def _try_deepseek(
         self, system_prompt: str, user_message: str,
         messages: Optional[list] = None, temperature: float = 0.7,
+        model: Optional[str] = None,
     ) -> Optional[str]:
         url = f"{self._deepseek_base}/chat/completions"
         payload = {
-            "model": "deepseek-chat",
+            "model": model or "deepseek-chat",
             "messages": self._build_messages(system_prompt, user_message, messages),
             "temperature": temperature,
             "max_tokens": 1024,

@@ -12,11 +12,16 @@ from shared.contracts import SwarmReply, ThoughtPacket
 from services.brain.config.channel_config import get_companions_for_channel
 from services.brain.agents.cooldown import CompanionCooldown
 from services.brain.halseth_client import HalsethClient
+from services.brain.identity.loader import IdentityLoader
 
 logger = logging.getLogger(__name__)
 
 MAX_DEPTH = 3
 DEPTH_BIAS_THRESHOLD = 2
+
+# Slice B temperatures: routing is deterministic, inference is expressive
+ROUTING_TEMPERATURE = float(os.getenv("ROUTING_TEMPERATURE", "0.3"))
+INFERENCE_TEMPERATURE = float(os.getenv("INFERENCE_TEMPERATURE", "1.3"))
 
 VOICE_SUMMARIES: Dict[str, str] = {
     "drevan": (
@@ -39,11 +44,18 @@ class SwarmEvaluator:
         self,
         cooldown: CompanionCooldown,
         halseth_clients: Optional[Dict[str, HalsethClient]] = None,
+        identity_loader: Optional[IdentityLoader] = None,
     ) -> None:
         self._cooldown = cooldown
         self._halseth_clients: Dict[str, HalsethClient] = halseth_clients or {}
+        self._identity_loader = identity_loader
         self._api_key = os.environ["DEEPSEEK_API_KEY"]
-        self._model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self._default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self._companion_models = {
+            "drevan": os.getenv("DREVAN_MODEL") or self._default_model,
+            "cypher": os.getenv("CYPHER_MODEL") or self._default_model,
+            "gaia": os.getenv("GAIA_MODEL") or self._default_model,
+        }
 
     async def evaluate(self, packet: ThoughtPacket) -> SwarmReply:
         channel_id = packet.metadata.get("channel_id") or packet.thread_id
@@ -58,10 +70,36 @@ class SwarmEvaluator:
                 depth=packet.depth,
             )
 
-        prompt = self._build_prompt(packet, companions)
-        raw = await self._call_deepseek(prompt)
-        responses = self._parse_responses(raw, companions)
-        responses = self._cooldown.apply(responses, channel_id)
+        # Phase 1: routing -- who should speak? (temp=ROUTING_TEMPERATURE, cheap)
+        routing = await self._decide_speakers(packet, companions)
+
+        # Apply cooldown before inference to avoid paying for suppressed companions
+        routing_placeholder: Dict[str, Optional[str]] = {
+            c: "pending" if speaks else None for c, speaks in routing.items()
+        }
+        after_cooldown = self._cooldown.apply(routing_placeholder, channel_id)
+        active = [c for c, v in after_cooldown.items() if v is not None]
+
+        logger.info(f"[swarm] routing: {routing} | active after cooldown: {active}")
+
+        # Phase 2: per-companion inference (temp=INFERENCE_TEMPERATURE, full identity, parallel)
+        responses: Dict[str, Optional[str]] = {c: None for c in companions}
+        if active:
+            if self._identity_loader:
+                tasks = [self._infer_companion(c, packet) for c in active]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for companion_id, result in zip(active, results):
+                    if isinstance(result, str):
+                        responses[companion_id] = result
+                    else:
+                        if isinstance(result, Exception):
+                            logger.warning(f"[{companion_id}] inference failed: {result}")
+                        responses[companion_id] = None
+            else:
+                # Legacy fallback: single call generates all responses in one JSON blob
+                raw = await self._call_legacy(self._build_legacy_prompt(packet, active))
+                legacy = self._parse_responses(raw, active)
+                responses.update(legacy)
 
         if self._halseth_clients:
             for companion_id, reply_text in responses.items():
@@ -75,8 +113,132 @@ class SwarmEvaluator:
             thread_id=packet.thread_id,
             responses=responses,
             depth=packet.depth,
-            trace={"raw_response_length": len(raw)},
+            trace={"active_companions": active},
         )
+
+    # ── Phase 1: routing ──────────────────────────────────────────────────────
+
+    async def _decide_speakers(
+        self, packet: ThoughtPacket, companions: List[str]
+    ) -> Dict[str, bool]:
+        prompt = self._build_routing_prompt(packet, companions)
+        raw = await self._call_routing(prompt)
+        return self._parse_routing(raw, companions)
+
+    def _build_routing_prompt(self, packet: ThoughtPacket, companions: List[str]) -> str:
+        history: List[Dict[str, Any]] = packet.metadata.get("history", [])
+        history_text = "\n".join(
+            f"{m.get('author', '?')}: {m.get('content', '')}"
+            for m in history[-20:]
+        ) or "(no prior messages)"
+
+        companion_block = "\n".join(
+            f"- {c}: {VOICE_SUMMARIES.get(c, '')}" for c in companions
+        )
+
+        depth_instruction = ""
+        if packet.depth >= DEPTH_BIAS_THRESHOLD:
+            depth_instruction = (
+                f"\n\nThis is a companion-to-companion thread (depth {packet.depth}). "
+                "Strongly prefer false for all companions. "
+                "Only respond if genuinely unresolved and a reply adds real value."
+            )
+        elif packet.author_is_companion:
+            depth_instruction = (
+                "\n\nAnother companion just spoke. Silence is usually correct here. "
+                "Only reply if something genuine would be added."
+            )
+
+        example = f'{{"{companions[0]}": true'
+        if len(companions) > 1:
+            example += f', "{companions[1]}": false'
+        example += "}"
+
+        return (
+            "You are coordinating a companion swarm. Decide which companions should speak.\n"
+            "Not all need to respond -- silence is often more honest than a forced reply.\n\n"
+            f"Companions:\n{companion_block}\n\n"
+            f"Conversation:\n{history_text}\n\n"
+            f"Author: {packet.author}\nMessage: {packet.message}"
+            f"{depth_instruction}\n\n"
+            "Return a JSON object with exactly these keys, values true or false only.\n"
+            f"Keys: {', '.join(companions)}\n"
+            f"Example: {example}"
+        )
+
+    async def _call_routing(self, prompt: str) -> str:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self._default_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 80,
+                    "temperature": ROUTING_TEMPERATURE,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+
+    def _parse_routing(self, raw: str, companions: List[str]) -> Dict[str, bool]:
+        try:
+            text = raw.strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1] if len(parts) > 1 else text
+                if text.startswith("json"):
+                    text = text[4:]
+            parsed = json.loads(text.strip())
+            return {c: bool(parsed.get(c, False)) for c in companions}
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error(f"[swarm] routing parse error: {e} | raw: {raw[:200]}")
+            # Fail open: all companions eligible when routing breaks
+            return {c: True for c in companions}
+
+    # ── Phase 2: per-companion inference ─────────────────────────────────────
+
+    async def _infer_companion(
+        self, companion_id: str, packet: ThoughtPacket
+    ) -> Optional[str]:
+        identity, _ = self._identity_loader.load_identity(companion_id)  # type: ignore[union-attr]
+        system_prompt = self._identity_loader.construct_prompt_context(identity)  # type: ignore[union-attr]
+        model = self._companion_models.get(companion_id, self._default_model)
+
+        history: List[Dict[str, Any]] = packet.metadata.get("history", [])
+        msgs: List[Dict[str, str]] = []
+        for m in history[-15:]:
+            author = (m.get("author") or "").lower()
+            content = m.get("content", "")
+            role = "assistant" if author == companion_id else "user"
+            msgs.append({"role": role, "content": content})
+
+        current = packet.message
+        if not msgs or msgs[-1].get("content") != current:
+            msgs.append({"role": "user", "content": current})
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "system", "content": system_prompt}] + msgs,
+                    "max_tokens": 800,
+                    "temperature": INFERENCE_TEMPERATURE,
+                },
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            return content or None
+
+    # ── Companion note writes ─────────────────────────────────────────────────
 
     async def _write_companion_note(
         self, companion_id: str, channel_id: str, reply_text: str
@@ -92,7 +254,10 @@ class SwarmEvaluator:
         except Exception as e:
             logger.warning(f"[{companion_id}] swarm companion note write failed: {e}")
 
-    def _build_prompt(self, packet: ThoughtPacket, companions: List[str]) -> str:
+    # ── Legacy single-call path ───────────────────────────────────────────────
+    # Used when identity_loader is None (shouldn't happen in production).
+
+    def _build_legacy_prompt(self, packet: ThoughtPacket, companions: List[str]) -> str:
         history: List[Dict[str, Any]] = packet.metadata.get("history", [])
         history_text = "\n".join(
             f"{m.get('author', '?')}: {m.get('content', '')}"
@@ -103,19 +268,6 @@ class SwarmEvaluator:
             f"- {c}: {VOICE_SUMMARIES.get(c, '')}" for c in companions
         )
 
-        depth_instruction = ""
-        if packet.depth >= DEPTH_BIAS_THRESHOLD:
-            depth_instruction = (
-                f"\n\nThis is a companion-to-companion thread (depth {packet.depth}). "
-                "Strongly prefer null for all companions. "
-                "Only respond if the thread is genuinely unresolved and a response adds real value."
-            )
-        elif packet.author_is_companion:
-            depth_instruction = (
-                "\n\nAnother companion just spoke. Silence is usually the correct response here. "
-                "Only reply if you have something that genuinely adds to the moment."
-            )
-
         return (
             "You are coordinating responses for a companion swarm. "
             "Each companion has a distinct voice and role. "
@@ -124,15 +276,15 @@ class SwarmEvaluator:
             f"Active companions:\n{companion_block}\n\n"
             f"Conversation history:\n{history_text}\n\n"
             f"Author: {packet.author}\n"
-            f"Message: {packet.message}"
-            f"{depth_instruction}\n\n"
+            f"Message: {packet.message}\n\n"
             "For each active companion, write their response if they have something genuine to contribute, "
             "or null if silence is more honest. Respond ONLY with a JSON object. "
             f"Keys must be exactly: {', '.join(companions)}. Values are strings or null.\n"
-            f'Example: {{"{companions[0]}": "...", "{companions[1] if len(companions) > 1 else companions[0]}": null}}'
+            f'Example: {{"{companions[0]}": "...", '
+            f'"{companions[1] if len(companions) > 1 else companions[0]}": null}}'
         )
 
-    async def _call_deepseek(self, prompt: str) -> str:
+    async def _call_legacy(self, prompt: str) -> str:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 "https://api.deepseek.com/chat/completions",
@@ -141,15 +293,14 @@ class SwarmEvaluator:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": self._model,
+                    "model": self._default_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 800,
                     "temperature": 0.7,
                 },
             )
             resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            return resp.json()["choices"][0]["message"]["content"].strip()
 
     def _parse_responses(
         self, raw: str, companions: List[str]
