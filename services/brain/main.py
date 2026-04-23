@@ -12,17 +12,21 @@ import os
 import uuid as _uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Union
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from shared.contracts import AgentReply, ThoughtPacket
+from shared.contracts import AgentReply, SwarmReply, ThoughtPacket
 from services.brain.config import Config
 from services.brain.identity.loader import IdentityLoader
 from services.brain.agents.router import AgentRouter
+from services.brain.agents.evaluator import SwarmEvaluator
+from services.brain.agents.dedup import MessageDedup
+from services.brain.agents.cooldown import CompanionCooldown
+from services.brain.config.channel_config import load_channel_config
 from services.brain.inference_client import InferenceClient
 from services.brain.halseth_client import HalsethClient
 from services.brain.webmind_client import WebMindClient
@@ -71,12 +75,17 @@ else:
 # Initial router (no orient cache); lifespan will replace with wired version
 agent_router = AgentRouter(identity_loader, inference_client=_inference_client)
 
+# Phase 2 swarm infrastructure
+_cooldown = CompanionCooldown()
+_dedup = MessageDedup()
+_swarm_evaluator: SwarmEvaluator | None = None
+
 _synthesis_loop = None
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global _synthesis_loop, agent_router
+    global _synthesis_loop, agent_router, _swarm_evaluator
 
     # Setup Halseth client (shared by router post-response writes + synthesis loop).
     # WEBMIND_URL defaults to Halseth URL so OrientCache reads from the live data backend.
@@ -106,6 +115,14 @@ async def lifespan(app):
         orient_cache=orient_cache,
         halseth_client=halseth_client,
     )
+
+    # Initialize swarm evaluator if SWARM_MODE is enabled
+    if Config.SWARM_MODE:
+        load_channel_config()
+        _swarm_evaluator = SwarmEvaluator(_cooldown)
+        logger.info("[brain] SWARM_MODE=true: SwarmEvaluator initialized")
+    else:
+        logger.info("[brain] SWARM_MODE=false: Phase 1 relay active")
 
     # Start synthesis loop if fully configured
     if Config.SYNTHESIS_ENABLED and _inference_client and halseth_client and webmind_client:
@@ -166,33 +183,68 @@ async def health_check():
 
 
 @app.post("/chat")
-async def chat(packet: ThoughtPacket) -> AgentReply:
+async def chat(packet: ThoughtPacket) -> Union[AgentReply, SwarmReply]:
     """
-    Process ThoughtPacket and return AgentReply.
+    Process ThoughtPacket and return AgentReply (Phase 1) or SwarmReply (Phase 2).
 
-    Routing:
-    - Check for override prefix in message ("Drevan:", "Cypher:", "Gaia:")
-    - Use thread_id mapping if exists
-    - Fall back to packet.agent_id
+    Phase 2 (SWARM_MODE=true):
+    - Deduplicates by message_id so concurrent bot instances don't double-evaluate
+    - SwarmEvaluator decides which companions respond and generates their replies
+
+    Phase 1 (SWARM_MODE=false):
+    - Single-agent relay via AgentRouter (unchanged behavior)
     """
-    logger.info(f"Processing packet {packet.packet_id} for thread {packet.thread_id}")
+    logger.info(f"Processing packet {packet.packet_id} thread={packet.thread_id} depth={packet.depth}")
 
+    if Config.SWARM_MODE and _swarm_evaluator is not None:
+        message_id = str(packet.metadata.get("message_id") or packet.packet_id)
+        is_leader, fut = await _dedup.get_or_start(message_id)
+
+        if is_leader:
+            try:
+                reply = await _swarm_evaluator.evaluate(packet)
+                fut.set_result(reply)
+            except Exception as e:
+                error_id = str(_uuid.uuid4())[:8]
+                logger.error(f"Swarm eval error {error_id}: {e}", exc_info=True)
+                from services.brain.config.channel_config import get_companions_for_channel
+                ch = str(packet.metadata.get("channel_id") or packet.thread_id)
+                companions_fallback = get_companions_for_channel(ch)
+                fallback = SwarmReply(
+                    packet_id=packet.packet_id,
+                    thread_id=packet.thread_id,
+                    responses={c: None for c in companions_fallback},
+                    depth=packet.depth,
+                    status="error",
+                    trace={"error_id": error_id},
+                )
+                fut.set_result(fallback)
+            return await fut
+        else:
+            import asyncio
+            try:
+                return await asyncio.wait_for(fut, timeout=35.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[swarm] follower timeout for message_id={message_id}")
+                from services.brain.config.channel_config import get_companions_for_channel
+                ch = str(packet.metadata.get("channel_id") or packet.thread_id)
+                companions_fallback = get_companions_for_channel(ch)
+                return SwarmReply(
+                    packet_id=packet.packet_id,
+                    thread_id=packet.thread_id,
+                    responses={c: None for c in companions_fallback},
+                    depth=packet.depth,
+                    status="error",
+                )
+
+    # Phase 1 fallback: single-agent relay (unchanged behavior)
     try:
-        # Route to correct agent and get response
         reply = await agent_router.route_and_process(packet)
-
-        logger.info(
-            f"Packet {packet.packet_id} processed successfully by {reply.agent_id}"
-        )
-
+        logger.info(f"Packet {packet.packet_id} processed by {reply.agent_id}")
         return reply
-
     except Exception as e:
         error_id = str(_uuid.uuid4())[:8]
-        logger.error(
-            f"Error {error_id} processing packet {packet.packet_id}: {e}",
-            exc_info=True,
-        )
+        logger.error(f"Error {error_id} processing packet {packet.packet_id}: {e}", exc_info=True)
         return AgentReply(
             packet_id=packet.packet_id,
             agent_id=packet.agent_id,
