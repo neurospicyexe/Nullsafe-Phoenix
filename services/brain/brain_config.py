@@ -47,9 +47,12 @@ class Config:
     DREVAN_MODEL: Optional[str] = os.getenv("DREVAN_MODEL")
     GAIA_MODEL: Optional[str] = os.getenv("GAIA_MODEL")
 
-    # Slice B: swarm temperatures
+    # Slice B: swarm temperatures (per-companion overrides fall back to INFERENCE_TEMPERATURE)
     ROUTING_TEMPERATURE: float = float(os.getenv("ROUTING_TEMPERATURE", "0.3"))
     INFERENCE_TEMPERATURE: float = float(os.getenv("INFERENCE_TEMPERATURE", "1.3"))
+    CYPHER_TEMPERATURE: Optional[float] = float(os.getenv("CYPHER_TEMPERATURE")) if os.getenv("CYPHER_TEMPERATURE") else None
+    DREVAN_TEMPERATURE: Optional[float] = float(os.getenv("DREVAN_TEMPERATURE")) if os.getenv("DREVAN_TEMPERATURE") else None
+    GAIA_TEMPERATURE: Optional[float] = float(os.getenv("GAIA_TEMPERATURE")) if os.getenv("GAIA_TEMPERATURE") else None
 
     @staticmethod
     def validate():
@@ -101,5 +104,6 @@ class Config:
         print(f"  Cypher model: {Config.CYPHER_MODEL or '(default)'}")
         print(f"  Drevan model: {Config.DREVAN_MODEL or '(default)'}")
         print(f"  Gaia model: {Config.GAIA_MODEL or '(default)'}")
-        print(f"  Routing temp: {Config.ROUTING_TEMPERATURE} / Inference temp: {Config.INFERENCE_TEMPERATURE}")
+        print(f"  Routing temp: {Config.ROUTING_TEMPERATURE} / Inference temp (default): {Config.INFERENCE_TEMPERATURE}")
+        print(f"  Cypher temp: {Config.CYPHER_TEMPERATURE or '(default)'} / Drevan temp: {Config.DREVAN_TEMPERATURE or '(default)'} / Gaia temp: {Config.GAIA_TEMPERATURE or '(default)'}")
         print("=" * 60)
