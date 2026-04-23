@@ -253,6 +253,46 @@ async def test_router_injects_limbic_into_system_prompt():
     mock_cache.get.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_post_response_writes_uses_correct_companion_client():
+    from unittest.mock import MagicMock, AsyncMock
+    from services.brain.agents.router import AgentRouter
+
+    mock_drevan = MagicMock()
+    mock_drevan.add_companion_note = AsyncMock()
+    mock_cypher = MagicMock()
+    mock_cypher.add_companion_note = AsyncMock()
+
+    router = AgentRouter(
+        identity_loader=MagicMock(),
+        halseth_clients={"drevan": mock_drevan, "cypher": mock_cypher},
+    )
+
+    await router._post_response_writes("ch-test", "hello", "drevan reply text", "drevan")
+
+    mock_drevan.add_companion_note.assert_called_once()
+    mock_cypher.add_companion_note.assert_not_called()
+    assert "ch-test" in mock_drevan.add_companion_note.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_post_response_writes_unknown_agent_is_noop():
+    from unittest.mock import MagicMock, AsyncMock
+    from services.brain.agents.router import AgentRouter
+
+    mock_cypher = MagicMock()
+    mock_cypher.add_companion_note = AsyncMock()
+
+    router = AgentRouter(
+        identity_loader=MagicMock(),
+        halseth_clients={"cypher": mock_cypher},
+    )
+
+    await router._post_response_writes("ch-test", "hello", "gaia text", "gaia")
+
+    mock_cypher.add_companion_note.assert_not_called()
+
+
 class TestBrainConfig:
     """Test suite for Brain service configuration."""
 
