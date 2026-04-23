@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from shared.contracts import AgentReply, SwarmReply, ThoughtPacket
-from services.brain.config import Config
+from services.brain.brain_config import Config
 from services.brain.identity.loader import IdentityLoader
 from services.brain.agents.router import AgentRouter
 from services.brain.agents.evaluator import SwarmEvaluator
