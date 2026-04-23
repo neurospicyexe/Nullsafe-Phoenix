@@ -38,6 +38,9 @@ class Config:
     SYNTHESIS_INTERVAL: int = int(os.getenv("SYNTHESIS_INTERVAL", "1200"))
     SYNTHESIS_ENABLED: bool = os.getenv("SYNTHESIS_ENABLED", "false").lower() == "true"
 
+    # Phase 2 swarm mode
+    SWARM_MODE: bool = os.getenv("SWARM_MODE", "false").lower() == "true"
+
     @staticmethod
     def validate():
         """Validate required config on startup."""
@@ -83,4 +86,5 @@ class Config:
         print(f"  WebMind URL: {Config.WEBMIND_URL}")
         print(f"  Synthesis enabled: {Config.SYNTHESIS_ENABLED}")
         print(f"  Synthesis interval: {Config.SYNTHESIS_INTERVAL}s")
+        print(f"  SWARM_MODE: {Config.SWARM_MODE}")
         print("=" * 60)
