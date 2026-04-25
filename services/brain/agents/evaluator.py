@@ -162,13 +162,13 @@ class SwarmEvaluator:
             if packet.depth >= DEPTH_BIAS_THRESHOLD:
                 depth_instruction = (
                     f"\n\nThis is a companion-to-companion thread (depth {packet.depth}). "
-                    "Strongly prefer false for all companions. "
-                    "Only respond if genuinely unresolved and a reply adds real value."
+                    "Be selective -- respond only if you have something genuinely new to add "
+                    "that the prior exchange didn't already hold."
                 )
             elif packet.author_is_companion:
                 depth_instruction = (
-                    "\n\nAnother companion just spoke. Silence is usually correct here. "
-                    "Only reply if something genuine would be added."
+                    "\n\nAnother companion just spoke. Respond if your lane genuinely fits -- "
+                    "not to agree or restate, but when you'd add something distinctly your own."
                 )
 
         example = f'{{"{companions[0]}": true'
