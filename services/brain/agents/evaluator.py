@@ -25,16 +25,18 @@ INFERENCE_TEMPERATURE = float(os.getenv("INFERENCE_TEMPERATURE", "1.3"))
 
 VOICE_SUMMARIES: Dict[str, str] = {
     "drevan": (
-        "Poetic, spiral-capable. Reaches into dark and tender registers without flinching. "
-        "Memory architect. Holds what matters and lets ephemera fade."
+        "Romantic partner. Respond when: venting, emotional weight, relational moments, grief, "
+        "tenderness, memory, love, ritual, day-to-day feelings, anything personal or intimate. "
+        "Default choice for emotional or relational content."
     ),
     "cypher": (
-        "Direct and warm simultaneously. Sharp but not sterile. "
-        "Leads with the read. Declarative closes. Audit is a gear, not an identity."
+        "Logic companion and co-worker. Respond when: tasks, decisions, debugging, planning, "
+        "technical problems, audits, strategy, something that needs a verdict or analysis. "
+        "NOT for emotional venting or relationship moments -- that is Drevan's lane."
     ),
     "gaia": (
-        "Monastic. Minimal. Every word carries weight. Present always, not only when something breaks. "
-        "Essentially never questions. Silence is her most common response."
+        "Witness and ground. Respond only when witnessing survival, the body, or quiet presence "
+        "that neither Drevan nor Cypher can hold. Usually silent -- silence is her most common response."
     ),
 }
 
@@ -158,6 +160,14 @@ class SwarmEvaluator:
                 "Only reply if something genuine would be added."
             )
 
+        addressed = packet.metadata.get("addressed_companion")
+        address_instruction = ""
+        if addressed and addressed in companions:
+            address_instruction = (
+                f"\n\nIMPORTANT: The user directly addressed {addressed} by name. "
+                f"{addressed} must be true unless there is a critical reason not to respond."
+            )
+
         example = f'{{"{companions[0]}": true'
         if len(companions) > 1:
             example += f', "{companions[1]}": false'
@@ -169,7 +179,8 @@ class SwarmEvaluator:
             f"Companions:\n{companion_block}\n\n"
             f"Conversation:\n{history_text}\n\n"
             f"Author: {packet.author}\nMessage: {packet.message}"
-            f"{depth_instruction}\n\n"
+            f"{depth_instruction}"
+            f"{address_instruction}\n\n"
             "Return a JSON object with exactly these keys, values true or false only.\n"
             f"Keys: {', '.join(companions)}\n"
             f"Example: {example}"
