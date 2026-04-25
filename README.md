@@ -58,6 +58,8 @@ All tables have write-time caps or TTL -- nothing grows unbounded.
 
 ## Setup
 
+**Not sure where to start?** See [INSTALL.md](./INSTALL.md) for a beginner-friendly guide covering local development and VPS deployment.
+
 ### What You Need
 
 - Python 3.11 or newer

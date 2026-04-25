@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## CRITICAL CONTEXT — Read This First
 
-Phoenix is NOT the live system. It is the future target. The live companion suite is **Bigger Better Halseth (BBH)**, located at `C:\dev\Bigger_Better_Halseth`.
+Phoenix is NOT the live system. It is the future target. The live companion suite is **Bigger Better Halseth (BBH)**, located in the sibling `Bigger_Better_Halseth` repository.
 
 **What's actually running right now:**
-- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0058. This IS the WebMind for the lean phase.
+- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0060. This IS the WebMind for the lean phase.
 - **nullsafe-second-brain** -- VPS MCP server. Obsidian vault synthesis, RAG, persona-feeder.
 - **nullsafe-discord** -- BerryBytes/pm2 deployment. Three live Discord bots (Drevan, Cypher, Gaia).
 - **nullsafe-plural-v2** -- Cloudflare Worker. SimplyPlural fronting integration.
@@ -19,8 +19,8 @@ Phoenix is NOT the live system. It is the future target. The live companion suit
 The reliability kernel (Relay, Brain, Redis queues, Web UI) is complete and sits here as the future host for Heart Phase. When Heart Phase ships, Phoenix absorbs the BBH suite. The WebMind microservice (`services/webmind/`) here is a future scaffold -- Halseth IS the WebMind until Phoenix Heart Phase is ready.
 
 **Before working on Phoenix, read:**
-- `C:\dev\Bigger_Better_Halseth\CLAUDE.md` -- full BBH suite context, architecture decisions, what's live
-- `C:\dev\Bigger_Better_Halseth\docs\implementation-log.md` -- full history of what shipped and why
+- `../Bigger_Better_Halseth/CLAUDE.md` -- full BBH suite context, architecture decisions, what's live
+- `../Bigger_Better_Halseth/docs/implementation-log.md` -- full history of what shipped and why
 
 **Current Heart Phase status:** Kernel complete. WebMind slices 2-6 shipped (session-handoffs, threads, orient/ground, reminders, Bond Layer, Autonomy v0, Growth Layer, structural hardening). Slice 7 (MCP Adapter surface) pending. Nothing in `services/webmind/` here is live -- Halseth owns that surface until Phoenix absorbs it.
 
@@ -32,11 +32,21 @@ When making changes to one identity/config file (e.g., Cypher), always check and
 
 ## Project Scope
 
-When reviewing or fixing bugs across the multi-agent system, always scan ALL projects: Phoenix, Hearth, relay, discord_bot, and any archived directories. Never assume a directory doesn't exist without checking.
+When reviewing or fixing bugs across the multi-agent system, always scan ALL projects: Brain, Discord, Phoenix, Hearth, Librarian, relay, discord_bot, and any agent identity repos or archived directories. Never assume a directory doesn't exist without checking. Do not declare a cross-project review complete until all of these are confirmed.
 
 ## Testing
 
-After implementing any TypeScript changes, run the integration/unit tests before committing. If tests fail, fix all errors (including missing metadata fields, wrong types, empty block formatting) before marking the task complete.
+After implementing any TypeScript changes or Python changes, run the full test suite before committing. If tests fail, fix all errors (including missing metadata fields, wrong types, empty block formatting) before marking the task complete.
+
+After security fixes or schema changes specifically, run the full test suite immediately -- fixtures break frequently from field additions, type changes, and param renames.
+
+## Deployment / Infrastructure
+
+Brain runs on the VPS (BerryBytes/pm2), not the workstation. Always confirm the deployment target path before assuming local vs remote execution. When in doubt, check `pm2 list` via SSH before running any deploy step.
+
+## Communication Style
+
+Lead with action, then context only if asked. Keep explanations concise and chunked -- dense walls of text are hard to parse under cognitive load. One clear step at a time beats a complete picture upfront.
 
 ## Project Overview
 
@@ -293,8 +303,13 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 - [services/relay/drainer.py](services/relay/drainer.py) - Background queue processor
 - [services/relay/config.py](services/relay/config.py) - Relay configuration with env loading
 - [services/brain/main.py](services/brain/main.py) - Brain FastAPI app
-- [services/brain/config.py](services/brain/config.py) - Brain configuration with validation
+- [services/brain/brain_config.py](services/brain/brain_config.py) - Brain configuration with validation (renamed from config.py)
 - [services/brain/agents/router.py](services/brain/agents/router.py) - Thread routing and agent selection
+- [services/brain/agents/evaluator.py](services/brain/agents/evaluator.py) - SwarmEvaluator (Phase 2 heterarchic swarm)
+- [services/brain/agents/dedup.py](services/brain/agents/dedup.py) - MessageDedup in-memory cache
+- [services/brain/agents/cooldown.py](services/brain/agents/cooldown.py) - CompanionCooldown per-companion gate
+- [services/brain/config/channel_config.py](services/brain/config/channel_config.py) - channels.yaml loader
+- [services/brain/inference_client.py](services/brain/inference_client.py) - InferenceClient (Slice B per-companion routing)
 - [services/brain/identity/loader.py](services/brain/identity/loader.py) - YAML identity loading
 - [services/discord_bot/bot.py](services/discord_bot/bot.py) - Discord bot message handler
 - [services/discord_bot/config.py](services/discord_bot/config.py) - Bot configuration with per-agent settings
@@ -315,7 +330,8 @@ Routing logic in [services/brain/agents/router.py](services/brain/agents/router.
 
 ### Testing & Validation
 - [scripts/smoke_test.ps1](scripts/smoke_test.ps1) - Comprehensive end-to-end smoke test (8 scenarios)
-- [services/webmind/tests/test_webmind.py](services/webmind/tests/test_webmind.py) - WebMind tests: contracts, endpoints, cap/retention, and growth (Slices 2-6 + post-6 hardening; ~170 tests)
+- [services/webmind/tests/test_webmind.py](services/webmind/tests/test_webmind.py) - WebMind tests: contracts, endpoints, cap/retention, and growth (Slices 2-6 + post-6 hardening; ~117 tests)
+- [services/brain/tests/test_swarm.py](services/brain/tests/test_swarm.py) - Swarm evaluator + routing regression tests (14 tests)
 
 ## Configuration
 
@@ -342,9 +358,15 @@ All services use environment variables with fail-fast validation and safe startu
 **Optional:**
 - `IDENTITY_DIR` - Identity YAML directory (default: ./services/brain/identity/data)
 - `OBSIDIAN_VAULT_PATH` - Obsidian vault path (for future write tool)
-- `ANTHROPIC_API_KEY` - Anthropic API key (required if INFERENCE_ENABLED=true)
-- `OPENAI_API_KEY` - OpenAI API key (required if INFERENCE_ENABLED=true)
-- `DEEPSEEK_API_KEY` - DeepSeek API key (optional)
+- `ANTHROPIC_API_KEY` - Anthropic API key (if using Anthropic for inference)
+- `OPENAI_API_KEY` - OpenAI API key (if using OpenAI for inference)
+- `DEEPSEEK_API_KEY` - DeepSeek API key (primary inference provider)
+- `DEEPSEEK_MODEL` - Default model (default: deepseek-chat)
+- `SWARM_MODE` - Enable heterarchic swarm (default: false)
+- `ROUTING_TEMPERATURE` - Temperature for routing calls (default: 0.3)
+- `INFERENCE_TEMPERATURE` - Default inference temperature (default: 1.3)
+- `CYPHER_MODEL` / `DREVAN_MODEL` / `GAIA_MODEL` - Per-companion model overrides (fall back to DEEPSEEK_MODEL)
+- `CYPHER_TEMPERATURE` / `DREVAN_TEMPERATURE` / `GAIA_TEMPERATURE` - Per-companion temperature overrides
 
 ### Discord Bot Service
 
@@ -390,8 +412,13 @@ Brain shipped (beyond kernel stub):
 - Relay mode (multi-turn inference, Halseth wiring, post-response STM writes)
 - Worldview conclusions + flagged_beliefs injected into inference context
 - write_conclusion accepts worldview fields (confidence, belief_type, subject, provenance)
+- Phase 2 Heterarchic Swarm: SwarmReply contract + author/depth fields on ThoughtPacket, channels.yaml channel config, MessageDedup in-memory cache, CompanionCooldown (per-companion per-channel 5s gate), SwarmEvaluator (depth cap, cooldown, JSON parsing), SWARM_MODE flag wired into /chat
+- Phase 3 Slice A: per-companion Halseth note writes in swarm, PluralKit author attribution fix
+- Phase 3 Slice B: routing/inference split (ROUTING_TEMPERATURE=0.3, INFERENCE_TEMPERATURE=1.3), InferenceClient, per-companion model overrides (CYPHER_MODEL, DREVAN_MODEL, GAIA_MODEL)
+- Per-companion inference temperatures (CYPHER_TEMPERATURE, DREVAN_TEMPERATURE, GAIA_TEMPERATURE)
+- Routing fixes: VOICE_SUMMARIES per-companion routing descriptions, addressed_companion hint, depth bias suppression, persistent http clients, multi-companion history role assignment in evaluator
 
-Pending: Slice 7 (MCP Adapter surface). Real LLM inference fully wired for Brain relay mode (INFERENCE_MODE=brain, DeepSeek primary).
+Pending: Slice 7 (MCP Adapter surface).
 The live system is BBH (see top of this file). Phoenix absorbs it when Heart Phase is ready (target: summer 2026).
 Details: `docs/phase-status.md` and `PHOENIX_HEART_PHASE_PLAN.md`.
 
