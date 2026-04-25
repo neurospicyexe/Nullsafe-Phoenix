@@ -283,3 +283,36 @@ async def test_inference_exception_doesnt_blank_others():
     assert reply.responses["drevan"] == "drevan reply"
     assert reply.responses["cypher"] is None  # exception -> None
     assert reply.responses["gaia"] == "gaia reply"
+
+
+# ── Routing prompt: addressed_companion ───────────────────────────────────────
+
+def test_routing_prompt_includes_addressed_companion():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher", "gaia"]
+    packet = _make_packet(metadata={"channel_id": "ch-test", "history": [], "addressed_companion": "drevan"})
+    prompt = ev._build_routing_prompt(packet, companions)
+    assert "drevan must be true" in prompt
+
+
+def test_routing_prompt_no_address_no_hint():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher", "gaia"]
+    packet = _make_packet(metadata={"channel_id": "ch-test", "history": []})
+    prompt = ev._build_routing_prompt(packet, companions)
+    assert "must be true" not in prompt
+
+
+def test_routing_prompt_addressed_suppresses_depth_bias():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher", "gaia"]
+    packet = _make_packet(
+        depth=3,
+        metadata={"channel_id": "ch-test", "history": [], "addressed_companion": "drevan"},
+    )
+    prompt = ev._build_routing_prompt(packet, companions)
+    assert "drevan must be true" in prompt
+    assert "Strongly prefer false" not in prompt
