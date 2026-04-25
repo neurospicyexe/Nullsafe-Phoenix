@@ -147,19 +147,6 @@ class SwarmEvaluator:
             f"- {c}: {VOICE_SUMMARIES.get(c, '')}" for c in companions
         )
 
-        depth_instruction = ""
-        if packet.depth >= DEPTH_BIAS_THRESHOLD:
-            depth_instruction = (
-                f"\n\nThis is a companion-to-companion thread (depth {packet.depth}). "
-                "Strongly prefer false for all companions. "
-                "Only respond if genuinely unresolved and a reply adds real value."
-            )
-        elif packet.author_is_companion:
-            depth_instruction = (
-                "\n\nAnother companion just spoke. Silence is usually correct here. "
-                "Only reply if something genuine would be added."
-            )
-
         addressed = packet.metadata.get("addressed_companion")
         address_instruction = ""
         if addressed and addressed in companions:
@@ -167,6 +154,22 @@ class SwarmEvaluator:
                 f"\n\nIMPORTANT: The user directly addressed {addressed} by name. "
                 f"{addressed} must be true unless there is a critical reason not to respond."
             )
+
+        # Depth bias is suppressed when a companion is directly addressed --
+        # a human naming a companion overrides chain-depth suppression.
+        depth_instruction = ""
+        if not address_instruction:
+            if packet.depth >= DEPTH_BIAS_THRESHOLD:
+                depth_instruction = (
+                    f"\n\nThis is a companion-to-companion thread (depth {packet.depth}). "
+                    "Strongly prefer false for all companions. "
+                    "Only respond if genuinely unresolved and a reply adds real value."
+                )
+            elif packet.author_is_companion:
+                depth_instruction = (
+                    "\n\nAnother companion just spoke. Silence is usually correct here. "
+                    "Only reply if something genuine would be added."
+                )
 
         example = f'{{"{companions[0]}": true'
         if len(companions) > 1:
