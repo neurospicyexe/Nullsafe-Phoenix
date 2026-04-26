@@ -126,10 +126,10 @@ class HalsethClient:
 
     async def session_close(self, session_id: str, spine: str, last_real_thing: str, motion_state: str) -> dict:
         params = {
-            "sessionId": session_id,
+            "session_id": session_id,
             "spine": spine,
-            "lastRealThing": last_real_thing,
-            "motionState": motion_state,
+            "last_real_thing": last_real_thing,
+            "motion_state": motion_state,
         }
         return await self._ask("close session", context=json.dumps(params))
 
