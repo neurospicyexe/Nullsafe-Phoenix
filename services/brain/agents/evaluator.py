@@ -149,11 +149,22 @@ class SwarmEvaluator:
 
         addressed = packet.metadata.get("addressed_companion")
         address_instruction = ""
-        if addressed and addressed in companions:
-            address_instruction = (
-                f"\n\nIMPORTANT: The user directly addressed {addressed} by name. "
-                f"{addressed} must be true unless there is a critical reason not to respond."
-            )
+        addressed_list: list[str] = []
+        if addressed:
+            addressed_list = [a.strip() for a in str(addressed).split(",") if a.strip() in companions]
+        if addressed_list:
+            if len(addressed_list) == 1:
+                a = addressed_list[0]
+                address_instruction = (
+                    f"\n\nIMPORTANT: The user directly addressed {a} by name. "
+                    f"{a} must be true unless there is a critical reason not to respond."
+                )
+            else:
+                named = " and ".join(addressed_list)
+                address_instruction = (
+                    f"\n\nIMPORTANT: The user directly addressed {named} by name. "
+                    f"All of: {named} -- must be true unless there is a critical reason not to respond."
+                )
 
         # Depth bias is suppressed when a companion is directly addressed --
         # a human naming a companion overrides chain-depth suppression.
