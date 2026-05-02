@@ -251,7 +251,7 @@ async def list_notes(
         raise HTTPException(status_code=422, detail={"code": "invalid_agent_id"})
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (agent_id, limit),
         )
         rows = await cursor.fetchall()
@@ -307,7 +307,7 @@ async def mind_orient(
             )
 
         cursor = await db.execute(
-            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC LIMIT 5",
+            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 5",
             (agent_id,),
         )
         note_rows = await cursor.fetchall()
@@ -423,7 +423,7 @@ async def mind_ground(
         ]
 
         cursor = await db.execute(
-            "SELECT * FROM session_handoffs WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM session_handoffs WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (agent_id, limit),
         )
         handoff_rows = await cursor.fetchall()
@@ -446,7 +446,7 @@ async def mind_ground(
         ]
 
         cursor = await db.execute(
-            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM continuity_notes WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (agent_id, limit),
         )
         note_rows = await cursor.fetchall()
@@ -536,7 +536,7 @@ async def get_session_handoffs(
 
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT * FROM session_handoffs WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM session_handoffs WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (agent_id, limit),
         )
         rows = await cursor.fetchall()
@@ -1180,14 +1180,14 @@ async def list_bond_handoffs(
             cursor = await db.execute(
                 """SELECT * FROM bond_handoff_summaries
                    WHERE agent_id = ? AND toward = ?
-                   ORDER BY created_at DESC LIMIT ?""",
+                   ORDER BY created_at DESC, rowid DESC LIMIT ?""",
                 (agent_id, toward, limit),
             )
         else:
             cursor = await db.execute(
                 """SELECT * FROM bond_handoff_summaries
                    WHERE agent_id = ?
-                   ORDER BY created_at DESC LIMIT ?""",
+                   ORDER BY created_at DESC, rowid DESC LIMIT ?""",
                 (agent_id, limit),
             )
         rows = await cursor.fetchall()
@@ -1335,6 +1335,10 @@ async def _enforce_cap(
     if excess <= 0:
         return 0
 
+    # rowid ASC is the tiebreaker for created_at collisions: when many rows
+    # are written within the same millisecond, the truly-oldest is the one
+    # inserted first (lowest rowid). Without this, prune order is undefined
+    # under tied timestamps and the wrong rows can be deleted.
     if salience_col:
         await db.execute(
             f"""DELETE FROM {table}
@@ -1343,7 +1347,7 @@ async def _enforce_cap(
                    WHERE agent_id = ? AND {salience_col} != 'high'
                    ORDER BY
                        CASE {salience_col} WHEN 'low' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-                       created_at ASC
+                       created_at ASC, rowid ASC
                    LIMIT ?
                )""",
             (agent_id, excess),
@@ -1354,7 +1358,7 @@ async def _enforce_cap(
                WHERE {id_col} IN (
                    SELECT {id_col} FROM {table}
                    WHERE agent_id = ?
-                   ORDER BY created_at ASC
+                   ORDER BY created_at ASC, rowid ASC
                    LIMIT ?
                )""",
             (agent_id, excess),
@@ -2001,12 +2005,12 @@ async def list_growth_markers(
     async with get_db() as db:
         if marker_type:
             cursor = await db.execute(
-                "SELECT * FROM growth_markers WHERE agent_id = ? AND marker_type = ? ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM growth_markers WHERE agent_id = ? AND marker_type = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (agent_id, marker_type, limit),
             )
         else:
             cursor = await db.execute(
-                "SELECT * FROM growth_markers WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM growth_markers WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (agent_id, limit),
             )
         rows = await cursor.fetchall()
