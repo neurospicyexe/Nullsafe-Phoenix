@@ -1339,6 +1339,14 @@ async def _enforce_cap(
     # are written within the same millisecond, the truly-oldest is the one
     # inserted first (lowest rowid). Without this, prune order is undefined
     # under tied timestamps and the wrong rows can be deleted.
+    #
+    # Soundness assumption: append-only inserts. SQLite rowid is monotonically
+    # increasing for INTEGER ROWID tables under append-only writes. VACUUM or
+    # `INSERT INTO ... SELECT ... FROM old` rebuilds the table and renumbers
+    # rowids by storage layout, breaking this assumption. Do not VACUUM these
+    # tables (continuity_notes, session_handoffs, bond_handoff_summaries,
+    # bond_notes, growth_journal, growth_patterns, growth_markers) without
+    # revisiting the tiebreaker (e.g., switching to id_col-as-tiebreaker).
     if salience_col:
         await db.execute(
             f"""DELETE FROM {table}
