@@ -103,19 +103,50 @@ class HalsethClient:
 
     async def bot_orient(self) -> Optional[dict]:
         """
-        Fetch warm-boot context. Returns synthesis_summary, ground_threads,
-        ground_handoff, rag_excerpts. Returns None on any failure.
+        Fetch warm-boot context. Returns the canonical 16-field bot_orient shape
+        from Halseth Librarian -- matches packages/shared/src/librarian.ts botOrient
+        plus history_excerpts, sibling_lanes, unaccepted_growth. Returns None on failure.
         """
         try:
             result = await self._ask("bot orient")
             data = result.get("data")
             if not data:
                 return None
+            active_conclusions_raw = data.get("active_conclusions") or []
+            flagged_beliefs_raw = data.get("flagged_beliefs") or []
             return {
                 "synthesis_summary": data.get("synthesis_summary"),
-                "ground_threads": data.get("ground_threads", []),
+                "ground_threads": data.get("ground_threads") or [],
                 "ground_handoff": data.get("ground_handoff"),
-                "rag_excerpts": data.get("rag_excerpts", []),
+                "rag_excerpts": data.get("rag_excerpts") or [],
+                "history_excerpts": data.get("history_excerpts") or [],
+                "identity_anchor": data.get("identity_anchor"),
+                "active_tensions": data.get("active_tensions") or [],
+                "relational_state_owner": data.get("relational_state_owner") or [],
+                "incoming_notes": data.get("incoming_notes") or [],
+                "sibling_lanes": data.get("sibling_lanes") or [],
+                "recent_growth": data.get("recent_growth") or [],
+                "active_patterns": data.get("active_patterns") or [],
+                "pending_seeds": data.get("pending_seeds") or [],
+                "unaccepted_growth": data.get("unaccepted_growth") or 0,
+                "active_conclusions": [
+                    {
+                        "text": c.get("conclusion_text"),
+                        "belief_type": c.get("belief_type"),
+                        "confidence": c.get("confidence"),
+                        "subject": c.get("subject"),
+                    }
+                    for c in active_conclusions_raw
+                ],
+                "flagged_beliefs": [
+                    {
+                        "text": c.get("conclusion_text"),
+                        "belief_type": c.get("belief_type"),
+                        "confidence": c.get("confidence"),
+                        "subject": c.get("subject"),
+                    }
+                    for c in flagged_beliefs_raw
+                ],
             }
         except Exception as e:
             logger.warning(f"[halseth] bot_orient failed: {e}")
@@ -363,13 +394,14 @@ class HalsethClient:
 
 def format_orient_context(orient: Optional[dict]) -> str:
     """
-    Format a bot_orient result into a compact context block (~1400 chars max).
-    Mirrors formatRecentContext() from librarian.ts.
+    Format a canonical bot_orient result into a compact system-prompt block.
+    Hard cap: ~2000 chars. Mirrors formatRecentContext() in packages/shared/src/librarian.ts
+    so Brain inference and Discord-bot fallback consume the same orient shape.
     """
     if not orient:
         return ""
 
-    parts = []
+    parts: list[str] = []
     if orient.get("synthesis_summary"):
         parts.append(f"## Recent\n{orient['synthesis_summary'][:600]}")
     if orient.get("ground_handoff"):
@@ -378,5 +410,43 @@ def format_orient_context(orient: Optional[dict]) -> str:
         parts.append(f"## Open threads\n{' / '.join(orient['ground_threads'])}")
     if orient.get("rag_excerpts"):
         parts.append(f"## Historical resonance\n{chr(10).join(orient['rag_excerpts'])[:300]}")
+    if orient.get("history_excerpts"):
+        parts.append(f"## Historical voice\n{chr(10).join(orient['history_excerpts'])[:300]}")
+    if orient.get("identity_anchor"):
+        parts.append(f"[Anchor] {orient['identity_anchor']}")
+    if orient.get("active_tensions"):
+        parts.append(f"[Tensions] {' | '.join(orient['active_tensions'])}")
+    if orient.get("relational_state_owner"):
+        parts.append(f"[Relational/Primary] {' | '.join(orient['relational_state_owner'])}")
+    if orient.get("incoming_notes"):
+        notes_lines = [f"{n.get('from')}: {n.get('content')}" for n in orient["incoming_notes"]]
+        parts.append(f"[Incoming Notes]\n{chr(10).join(notes_lines)}")
+    if orient.get("sibling_lanes"):
+        lane_lines = [
+            f"{l.get('companion_id')} [{l.get('motion_state')}]: {l.get('lane_spine')}"
+            for l in orient["sibling_lanes"]
+        ]
+        parts.append(f"[Sibling Lanes]\n{chr(10).join(lane_lines)}")
+    if orient.get("recent_growth"):
+        growth_lines = [f"[{g.get('type')}] {g.get('content')}" for g in orient["recent_growth"]]
+        parts.append(f"## Recent growth\n{chr(10).join(growth_lines)[:400]}")
+    if orient.get("active_patterns"):
+        parts.append(f"[Patterns] {' | '.join(orient['active_patterns'])}")
+    if orient.get("pending_seeds"):
+        parts.append(f"[Exploration queue] {' | '.join(orient['pending_seeds'])}")
+    if orient.get("unaccepted_growth"):
+        parts.append(f"[Unaccepted growth] {orient['unaccepted_growth']} pending review (accept canon, decline drift)")
+    if orient.get("active_conclusions"):
+        conclusion_lines = []
+        flagged_texts = {f.get("text") for f in (orient.get("flagged_beliefs") or [])}
+        for c in orient["active_conclusions"]:
+            subject_tag = f" ({c.get('subject')})" if c.get("subject") else ""
+            flag = "[?] " if c.get("text") in flagged_texts else ""
+            conf = c.get("confidence")
+            conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else str(conf)
+            conclusion_lines.append(
+                f"{flag}{c.get('belief_type')}: \"{c.get('text')}\"{subject_tag} ({conf_str})"
+            )
+        parts.append(f"[Worldview]\n{chr(10).join(conclusion_lines)}")
 
-    return "\n\n".join(parts)[:1400]
+    return "\n\n".join(parts)[:2000]

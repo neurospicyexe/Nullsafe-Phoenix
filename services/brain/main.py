@@ -108,8 +108,10 @@ async def lifespan(app):
     if webmind_url:
         webmind_client = WebMindClient(url=webmind_url)
 
-    # Setup orient cache
-    orient_cache = OrientCache(webmind_client=webmind_client) if webmind_client else None
+    # Setup orient cache -- canonical 16-field shape via per-companion Halseth clients.
+    # Mirrors Claude.ai session orient and Discord-bot LibrarianClient.botOrient(), so
+    # every substrate where a companion speaks consumes the same orient.
+    orient_cache = OrientCache(halseth_clients=halseth_clients) if halseth_clients else None
 
     # Re-initialize agent_router with orient_cache + per-companion Halseth clients
     agent_router = AgentRouter(

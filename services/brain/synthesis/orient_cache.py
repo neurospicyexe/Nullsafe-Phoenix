@@ -1,100 +1,56 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Thread-level TTL cache for WebMind orient data.
+Thread-level TTL cache for canonical Halseth bot_orient blocks.
 
-On cache miss (new thread or expired entry): fetches orient from WebMind,
-formats it into a system prompt injection block, caches it.
+On cache miss (new thread or expired entry): fetches the canonical 16-field
+bot_orient via per-companion HalsethClient, formats it into a system-prompt
+injection block via format_orient_context, caches it.
 On cache hit: returns the cached block immediately.
-If WebMind is offline: returns None (caller proceeds without context).
+If Halseth is unreachable: returns None (caller proceeds without context).
+
+Cache key is (thread_id, agent_id) so each companion gets its own orient
+view even when sharing a thread, and switching threads invalidates.
 """
 
 import logging
 import time
 from typing import Dict, Optional, Tuple
 
-from services.brain.webmind_client import WebMindClient
+from services.brain.halseth_client import HalsethClient, format_orient_context
 
 logger = logging.getLogger(__name__)
 
 
-def _format_limbic_block(orient: dict, agent_id: str) -> str:
-    """Format orient response into system prompt injection block."""
-    limbic = orient.get("limbic_state") or {}
-    notes = orient.get("recent_notes", [])
-
-    lines = []
-    if limbic.get("emotional_register"):
-        lines.append(f"Emotional register: {limbic['emotional_register']}")
-    if limbic.get("active_concerns"):
-        lines.append(f"Active concerns: {'; '.join(limbic['active_concerns'][:3])}")
-    if limbic.get("swarm_threads"):
-        lines.append(f"Swarm threads (yours and the triad's): {'; '.join(limbic['swarm_threads'][:3])}")
-    if limbic.get("live_tensions"):
-        lines.append(f"Live tensions: {'; '.join(limbic['live_tensions'][:2])}")
-    if limbic.get("open_questions"):
-        lines.append(f"Open questions: {'; '.join(limbic['open_questions'][:2])}")
-    if limbic.get("drift_vector"):
-        lines.append(f"Drift direction: {limbic['drift_vector']}")
-
-    if notes:
-        lines.append("\n[YOUR RECENT NOTES]")
-        for note in notes[:5]:
-            lines.append(f"- {note.get('note_text', '')}")
-
-    companion_note = (limbic.get("companion_notes") or {}).get(agent_id)
-    if companion_note:
-        lines.append(f"\n[COMPANION NOTE FOR YOU]\n{companion_note}")
-
-    # Worldview -- active beliefs
-    active_conclusions = orient.get("active_conclusions") or []
-    if active_conclusions:
-        conclusion_lines = []
-        for c in active_conclusions:
-            subj = f" (re: {c['subject']})" if c.get("subject") else ""
-            confidence = float(c.get("confidence") or 0)
-            conclusion_lines.append(
-                f"[{c.get('belief_type', '?')}] \"{c.get('conclusion_text', '')}\"{subj}"
-                f" (confidence: {confidence:.2f})"
-            )
-        lines.append("\n[Worldview -- active beliefs]\n" + "\n".join(conclusion_lines))
-
-    # Flagged beliefs -- contradiction signal
-    flagged_beliefs = orient.get("flagged_beliefs") or []
-    if flagged_beliefs:
-        flagged_lines = [
-            f"[?] [{c.get('belief_type', '?')}] \"{c.get('conclusion_text', '')}\""
-            for c in flagged_beliefs
-        ]
-        lines.append("\n[Flagged Beliefs -- review signal]\n" + "\n".join(flagged_lines))
-
-    if not lines:
-        return ""
-
-    return "[SWARM STATE]\n" + "\n".join(lines)
-
-
 class OrientCache:
     """
-    Thread-level TTL cache for formatted limbic context blocks.
+    Thread-level TTL cache for canonical orient blocks.
 
-    Key: thread_id (companions in the same thread share orient context)
-    Value: (expires_at, formatted_block)
-    TTL default: 300s (5 minutes)
+    Backed by per-companion HalsethClient.bot_orient(); identical surface to
+    Claude.ai's session orient and Discord-bot LibrarianClient.botOrient(),
+    so Brain inference consumes the same companion mind-shape as every other
+    speaking surface.
+
+    Key: (thread_id, agent_id) -- prevents cross-agent pollution and refreshes
+    on thread switch. TTL default: 300s.
     """
 
-    def __init__(self, webmind_client: Optional[WebMindClient] = None, ttl_seconds: int = 300):
-        self._webmind = webmind_client
+    def __init__(
+        self,
+        halseth_clients: Optional[Dict[str, HalsethClient]] = None,
+        ttl_seconds: int = 300,
+    ):
+        self._halseth_clients = halseth_clients or {}
         self._ttl = ttl_seconds
-        # {(thread_id, agent_id): (expires_at_timestamp, formatted_block)}
+        # {(thread_id, agent_id): (expires_at_monotonic, formatted_block)}
         self._cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
 
     async def get(self, thread_id: str, agent_id: str) -> Optional[str]:
         """
-        Return cached orient block or fetch from WebMind on miss.
+        Return cached canonical orient block or fetch from Halseth on miss.
 
-        Returns None if WebMind is unavailable or has no limbic state.
-        Cache key is (thread_id, agent_id) to prevent cross-agent pollution.
+        Returns None if the companion has no Halseth client wired or if the
+        Halseth call fails / returns no data.
         """
         now = time.monotonic()
         key = (thread_id, agent_id)
@@ -102,13 +58,17 @@ class OrientCache:
         if cached and now < cached[0]:
             return cached[1]
 
-        if self._webmind is None:
+        client = self._halseth_clients.get(agent_id)
+        if client is None:
             return None
 
-        orient = await self._webmind.get_orient(agent_id)
+        orient = await client.bot_orient()
         if orient is None:
             return None
 
-        block = _format_limbic_block(orient, agent_id)
+        block = format_orient_context(orient)
+        if not block:
+            return None
+
         self._cache[key] = (now + self._ttl, block)
         return block
