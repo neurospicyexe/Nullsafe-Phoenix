@@ -47,6 +47,7 @@ class AgentRouter:
         inference_client: Optional[InferenceClient] = None,
         orient_cache=None,
         halseth_clients: Optional[Dict[str, HalsethClient]] = None,
+        second_brain_client=None,
     ):
         """
         Initialize agent router.
@@ -56,11 +57,15 @@ class AgentRouter:
             inference_client: Inference client for LLM completions (optional; falls back to stub)
             orient_cache: OrientCache instance for limbic context injection (optional)
             halseth_clients: Per-companion Halseth clients for post-response note writes (optional)
+            second_brain_client: SecondBrainClient for per-message vault search (Thalamus pattern, optional).
+                Only used in direct mode -- relay mode trusts the bot-assembled system_prompt
+                because the bot already ran its own Thalamus search before calling Brain.
         """
         self.identity_loader = identity_loader
         self.inference_client = inference_client
         self._orient_cache = orient_cache
         self._halseth_clients: Dict[str, HalsethClient] = halseth_clients or {}
+        self._second_brain_client = second_brain_client
         self._thread_routing: Dict[str, str] = {}  # thread_id -> active_agent_id
 
     def detect_override(self, message: str) -> tuple[str | None, str]:
@@ -174,12 +179,29 @@ class AgentRouter:
                 messages = prior_history + [{"role": "user", "content": cleaned_message}]
                 logger.debug(f"[{active_agent_id}] relay mode: using bot-assembled context ({len(messages)} msgs)")
             else:
-                # Direct mode: build from identity loader + optional orient cache.
+                # Direct mode: build from identity loader + optional orient cache + optional vault search.
                 system_prompt = self.identity_loader.construct_prompt_context(identity)
                 if self._orient_cache:
                     limbic_block = await self._orient_cache.get(packet.thread_id, active_agent_id)
                     if limbic_block:
                         system_prompt = system_prompt + "\n\n" + limbic_block
+                # Thalamus pattern: per-message vault search via SecondBrainClient.
+                # Identity yamls announce "every message >=20 chars triggers automatic vault search";
+                # this fulfills that contract. Skipped in relay mode because the bot already searched.
+                # Vault failures return None silently and inference proceeds without context.
+                if self._second_brain_client is not None:
+                    try:
+                        from services.brain.second_brain_client import format_vault_injection
+                        vault_raw = await self._second_brain_client.search_for_message(
+                            cleaned_message, active_agent_id,
+                        )
+                        if vault_raw:
+                            system_prompt = system_prompt + format_vault_injection(vault_raw)
+                            logger.debug(f"[{active_agent_id}] vault hit injected ({len(vault_raw)} chars)")
+                    except Exception as e:
+                        # Defensive: SecondBrainClient itself never raises, but the import path
+                        # could fail in pathological cases. Vault miss must never break inference.
+                        logger.warning(f"[{active_agent_id}] vault search failed: {e}")
                 messages = None
                 meta_temperature = 0.7
 

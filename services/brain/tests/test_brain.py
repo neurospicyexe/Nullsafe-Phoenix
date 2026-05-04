@@ -254,6 +254,135 @@ async def test_router_injects_limbic_into_system_prompt():
 
 
 @pytest.mark.asyncio
+async def test_router_injects_vault_search_into_system_prompt():
+    """Direct mode: SecondBrainClient hit is wrapped + appended to system prompt."""
+    from unittest.mock import MagicMock, AsyncMock
+    from services.brain.agents.router import AgentRouter
+    from shared.contracts import ThoughtPacket
+    import uuid
+
+    mock_identity_loader = MagicMock()
+    mock_identity = MagicMock()
+    mock_identity.name = "Cypher"
+    mock_identity_loader.load_identity.return_value = (mock_identity, "abc123")
+    mock_identity_loader.construct_prompt_context.return_value = "You are Cypher."
+
+    mock_inference = AsyncMock()
+    mock_inference.complete.return_value = ("test reply", "local")
+
+    mock_sb = AsyncMock()
+    mock_sb.search_for_message.return_value = '{"chunks":[{"text":"vault hit body"}]}'
+
+    router = AgentRouter(
+        identity_loader=mock_identity_loader,
+        inference_client=mock_inference,
+        second_brain_client=mock_sb,
+    )
+
+    packet = ThoughtPacket(
+        packet_id=str(uuid.uuid4()),
+        timestamp="2026-05-04T12:00:00+00:00",
+        source="discord",
+        user_id="test-user",
+        thread_id="test-thread",
+        agent_id="cypher",
+        message="what does the team say about the rowid tiebreaker fix?",
+        metadata={"channel_id": "test-channel"},
+    )
+    reply = await router.route_and_process(packet)
+    assert reply.status == "ok"
+    mock_sb.search_for_message.assert_called_once()
+    # The complete() call should have received the system_prompt with vault injection appended.
+    sent_system_prompt = mock_inference.complete.call_args[0][0]
+    assert "Memory -- Second Brain retrieved for this message" in sent_system_prompt
+    assert "vault hit body" in sent_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_router_skips_vault_in_relay_mode():
+    """Relay mode (bot-assembled system_prompt + messages) MUST NOT call vault again --
+    the bot already ran its own Thalamus search before calling Brain."""
+    from unittest.mock import MagicMock, AsyncMock
+    from services.brain.agents.router import AgentRouter
+    from shared.contracts import ThoughtPacket
+    import uuid
+
+    mock_identity_loader = MagicMock()
+    mock_identity = MagicMock()
+    mock_identity_loader.load_identity.return_value = (mock_identity, "abc123")
+
+    mock_inference = AsyncMock()
+    mock_inference.complete.return_value = ("test reply", "local")
+
+    mock_sb = AsyncMock()
+    mock_sb.search_for_message.return_value = "should-not-be-called"
+
+    router = AgentRouter(
+        identity_loader=mock_identity_loader,
+        inference_client=mock_inference,
+        second_brain_client=mock_sb,
+    )
+
+    packet = ThoughtPacket(
+        packet_id=str(uuid.uuid4()),
+        timestamp="2026-05-04T12:00:00+00:00",
+        source="discord",
+        user_id="test-user",
+        thread_id="test-thread",
+        agent_id="cypher",
+        message="hello",
+        metadata={
+            "channel_id": "test-channel",
+            "system_prompt": "Bot-assembled prompt with [Memory -- Second Brain retrieved for this message: bot already searched]",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+    reply = await router.route_and_process(packet)
+    assert reply.status == "ok"
+    mock_sb.search_for_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_router_continues_when_vault_returns_none():
+    """Vault miss (returns None) must NOT modify system_prompt and MUST NOT break inference."""
+    from unittest.mock import MagicMock, AsyncMock
+    from services.brain.agents.router import AgentRouter
+    from shared.contracts import ThoughtPacket
+    import uuid
+
+    mock_identity_loader = MagicMock()
+    mock_identity_loader.load_identity.return_value = (MagicMock(), "abc")
+    mock_identity_loader.construct_prompt_context.return_value = "You are Cypher."
+
+    mock_inference = AsyncMock()
+    mock_inference.complete.return_value = ("ok", "local")
+
+    mock_sb = AsyncMock()
+    mock_sb.search_for_message.return_value = None
+
+    router = AgentRouter(
+        identity_loader=mock_identity_loader,
+        inference_client=mock_inference,
+        second_brain_client=mock_sb,
+    )
+
+    packet = ThoughtPacket(
+        packet_id=str(uuid.uuid4()),
+        timestamp="2026-05-04T12:00:00+00:00",
+        source="discord",
+        user_id="test-user",
+        thread_id="test-thread",
+        agent_id="cypher",
+        message="long enough query for vault search to fire",
+        metadata={"channel_id": "test-channel"},
+    )
+    reply = await router.route_and_process(packet)
+    assert reply.status == "ok"
+    sent_system_prompt = mock_inference.complete.call_args[0][0]
+    assert "Memory -- Second Brain retrieved" not in sent_system_prompt
+
+
+@pytest.mark.asyncio
 async def test_post_response_writes_uses_correct_companion_client():
     from unittest.mock import MagicMock, AsyncMock
     from services.brain.agents.router import AgentRouter
