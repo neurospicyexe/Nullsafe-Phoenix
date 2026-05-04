@@ -33,6 +33,7 @@ from services.brain.config.channel_config import load_channel_config
 from services.brain.inference_client import InferenceClient
 from services.brain.halseth_client import HalsethClient
 from services.brain.webmind_client import WebMindClient
+from services.brain.second_brain_client import SecondBrainClient
 from services.brain.synthesis.loop import SynthesisLoop
 from services.brain.synthesis.orient_cache import OrientCache
 
@@ -113,12 +114,24 @@ async def lifespan(app):
     # every substrate where a companion speaks consumes the same orient.
     orient_cache = OrientCache(halseth_clients=halseth_clients) if halseth_clients else None
 
-    # Re-initialize agent_router with orient_cache + per-companion Halseth clients
+    # Setup SecondBrainClient (Thalamus pattern) -- per-message vault search via
+    # halseth's /mind/search proxy. Same transport chain Discord uses. Only fires
+    # in direct mode; relay mode trusts bot-assembled context.
+    second_brain_client = None
+    if Config.HALSETH_URL and Config.HALSETH_ADMIN_SECRET:
+        second_brain_client = SecondBrainClient(
+            halseth_url=Config.HALSETH_URL,
+            secret=Config.HALSETH_ADMIN_SECRET,
+        )
+        logger.info("[brain] SecondBrainClient ready (Thalamus pattern via halseth /mind/search)")
+
+    # Re-initialize agent_router with orient_cache + per-companion Halseth clients + vault search
     agent_router = AgentRouter(
         identity_loader,
         inference_client=_inference_client,
         orient_cache=orient_cache,
         halseth_clients=halseth_clients,
+        second_brain_client=second_brain_client,
     )
 
     # Initialize swarm evaluator if SWARM_MODE is enabled
