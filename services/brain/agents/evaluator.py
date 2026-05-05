@@ -271,6 +271,12 @@ class SwarmEvaluator:
                 "messages": [{"role": "system", "content": system_prompt}] + msgs,
                 "max_tokens": 800,
                 "temperature": temperature,
+                # top_p clips the long tail; without it, high-temp sampling on
+                # DeepSeek's multilingual base resolves invented-language tokens
+                # (e.g. Calethian) to nearest-neighbor Spanish + vowel-corrupted
+                # word salad. Companion identities collapse without this cap.
+                "top_p": 0.95,
+                "frequency_penalty": 0.3,
             },
         )
         resp.raise_for_status()
