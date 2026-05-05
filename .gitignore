@@ -51,6 +51,8 @@ htmlcov/
 *.swp
 *.swo
 *~
+*.save
+*.save.*
 
 # Environment
 .env
