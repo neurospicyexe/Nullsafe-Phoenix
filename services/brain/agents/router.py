@@ -19,8 +19,13 @@ from shared.contracts import AgentReply, ThoughtPacket
 from services.brain.identity.loader import IdentityLoader
 from services.brain.inference_client import InferenceClient
 from services.brain.halseth_client import HalsethClient
+from services.brain.brain_config import Config
 
 logger = logging.getLogger(__name__)
+
+# B4: shared with evaluator.INFERENCE_TEMPERATURE -- prevents router and evaluator
+# from drifting apart on the inference temp default. Was three bare 0.7 literals.
+DEFAULT_INFERENCE_TEMP: float = Config.INFERENCE_TEMPERATURE
 
 
 class AgentRouter:
@@ -166,9 +171,9 @@ class AgentRouter:
             raw_messages = packet.metadata.get("messages")
             meta_messages: Optional[list] = raw_messages if isinstance(raw_messages, list) else None
             try:
-                meta_temperature: float = float(packet.metadata.get("temperature", 0.7))
+                meta_temperature: float = float(packet.metadata.get("temperature", DEFAULT_INFERENCE_TEMP))
             except (TypeError, ValueError):
-                meta_temperature = 0.7
+                meta_temperature = DEFAULT_INFERENCE_TEMP
 
             if meta_system_prompt and meta_messages is not None:
                 # Relay mode: use bot-assembled context; skip identity loader + orient cache.
@@ -203,7 +208,7 @@ class AgentRouter:
                         # could fail in pathological cases. Vault miss must never break inference.
                         logger.warning(f"[{active_agent_id}] vault search failed: {e}")
                 messages = None
-                meta_temperature = 0.7
+                meta_temperature = DEFAULT_INFERENCE_TEMP
 
             reply_text, backend = await self.inference_client.complete(
                 system_prompt,

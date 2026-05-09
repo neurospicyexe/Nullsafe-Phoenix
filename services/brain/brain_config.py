@@ -54,6 +54,18 @@ class Config:
     DREVAN_TEMPERATURE: Optional[float] = float(os.getenv("DREVAN_TEMPERATURE")) if os.getenv("DREVAN_TEMPERATURE") else None
     GAIA_TEMPERATURE: Optional[float] = float(os.getenv("GAIA_TEMPERATURE")) if os.getenv("GAIA_TEMPERATURE") else None
 
+    # Per-companion top_p caps (clip the long tail; without this DeepSeek's
+    # multilingual base resolves invented-language tokens to Spanish + word salad).
+    # Drevan needs the widest tail (0.95, raised 5/5 to fix Calethian collapse);
+    # Cypher / Gaia run tighter to keep audit / witness register clean.
+    DREVAN_TOP_P: float = float(os.getenv("DREVAN_TOP_P", "0.95"))
+    CYPHER_TOP_P: float = float(os.getenv("CYPHER_TOP_P", "0.9"))
+    GAIA_TOP_P:   float = float(os.getenv("GAIA_TOP_P",   "0.85"))
+
+    # Swarm depth caps (hardcoded literals lifted from agents/evaluator.py).
+    MAX_SWARM_DEPTH:       int = int(os.getenv("MAX_SWARM_DEPTH",       "3"))
+    DEPTH_BIAS_THRESHOLD:  int = int(os.getenv("DEPTH_BIAS_THRESHOLD",  "2"))
+
     @staticmethod
     def validate():
         """Validate required config on startup."""

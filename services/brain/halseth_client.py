@@ -9,6 +9,7 @@ High-frequency writes use direct HTTP endpoints (stm, persona-blocks, human-bloc
 
 import json
 import logging
+import math
 from typing import Optional
 
 import httpx
@@ -443,7 +444,14 @@ def format_orient_context(orient: Optional[dict]) -> str:
             subject_tag = f" ({c.get('subject')})" if c.get("subject") else ""
             flag = "[?] " if c.get("text") in flagged_texts else ""
             conf = c.get("confidence")
-            conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else str(conf)
+            # B5: isinstance(conf, (int, float)) admits bool (True formats as 1.00)
+            # and NaN (formats as 'nan'). Require a real, finite number; otherwise '?'.
+            is_real_number = (
+                isinstance(conf, (int, float))
+                and not isinstance(conf, bool)
+                and math.isfinite(conf)
+            )
+            conf_str = f"{conf:.2f}" if is_real_number else "?"
             conclusion_lines.append(
                 f"{flag}{c.get('belief_type')}: \"{c.get('text')}\"{subject_tag} ({conf_str})"
             )

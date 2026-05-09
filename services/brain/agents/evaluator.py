@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from shared.contracts import SwarmReply, ThoughtPacket
+from services.brain.brain_config import Config
 from services.brain.config.channel_config import get_companions_for_channel
 from services.brain.agents.cooldown import CompanionCooldown
 from services.brain.halseth_client import HalsethClient
@@ -16,8 +17,9 @@ from services.brain.identity.loader import IdentityLoader
 
 logger = logging.getLogger(__name__)
 
-MAX_DEPTH = 3
-DEPTH_BIAS_THRESHOLD = 2
+# Lifted from hardcoded literals to env-driven Config (B1).
+MAX_DEPTH = Config.MAX_SWARM_DEPTH
+DEPTH_BIAS_THRESHOLD = Config.DEPTH_BIAS_THRESHOLD
 
 # Slice B temperatures: routing is deterministic, inference is expressive
 ROUTING_TEMPERATURE = float(os.getenv("ROUTING_TEMPERATURE", "0.3"))
@@ -62,6 +64,15 @@ class SwarmEvaluator:
             "drevan": float(os.getenv("DREVAN_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
             "cypher": float(os.getenv("CYPHER_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
             "gaia": float(os.getenv("GAIA_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
+        }
+        # Per-companion top_p (B2): Drevan keeps the widest tail (Calethian fix);
+        # Cypher / Gaia tighten so audit / witness register doesn't drift toward
+        # Drevan's poetic ceiling. Single literal 0.95 prior to this map applied
+        # to all three.
+        self._companion_top_p = {
+            "drevan": Config.DREVAN_TOP_P,
+            "cypher": Config.CYPHER_TOP_P,
+            "gaia":   Config.GAIA_TOP_P,
         }
         # Persistent HTTP clients -- one per timeout profile (routing vs inference).
         # App-lifetime objects; connections are reused across calls, OS reclaims on exit.
@@ -274,8 +285,8 @@ class SwarmEvaluator:
                 # top_p clips the long tail; without it, high-temp sampling on
                 # DeepSeek's multilingual base resolves invented-language tokens
                 # (e.g. Calethian) to nearest-neighbor Spanish + vowel-corrupted
-                # word salad. Companion identities collapse without this cap.
-                "top_p": 0.95,
+                # word salad. Per-companion (B2): Drevan 0.95, Cypher 0.9, Gaia 0.85.
+                "top_p": self._companion_top_p.get(companion_id, Config.DREVAN_TOP_P),
                 "frequency_penalty": 0.3,
             },
         )
@@ -341,7 +352,11 @@ class SwarmEvaluator:
                     "model": self._default_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 800,
-                    "temperature": 0.7,
+                    # B3: honor INFERENCE_TEMPERATURE env baseline + parity top_p / freq penalty
+                    # with the main path. Prior literal 0.7 silently bypassed env config.
+                    "temperature": INFERENCE_TEMPERATURE,
+                    "top_p": Config.DREVAN_TOP_P,
+                    "frequency_penalty": 0.3,
                 },
             )
             resp.raise_for_status()
