@@ -303,10 +303,12 @@ class SwarmEvaluator:
         if not client:
             return
         try:
-            snippet = reply_text[:200].replace("\n", " ")
-            await client.add_companion_note(
-                f"[discord:swarm] responded in channel {channel_id}: {snippet}"
-            )
+            context = json.dumps({
+                "note_text": f"[discord:swarm] channel:{channel_id}\n\n{reply_text}",
+                "tags": ["discord", "swarm"],
+                "source": "discord_swarm",
+            })
+            await client.add_companion_note(context)
         except Exception as e:
             logger.warning(f"[{companion_id}] swarm companion note write failed: {e}")
 
