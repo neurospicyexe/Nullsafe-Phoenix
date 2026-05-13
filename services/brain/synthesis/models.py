@@ -24,4 +24,11 @@ class LimbicState(BaseModel):
         default_factory=list,
         description="Companion-owned threads from dreams/loops. First-class, not derivative.",
     )
-    companion_notes: Dict[str, str] = Field(default_factory=dict)
+    companion_notes: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Structural observations about each companion -- what the synthesis layer sees them "
+            "working through. Third-person, factual, not voiced. NOT written to wm_continuity_notes; "
+            "retained in limbic blob only."
+        ),
+    )

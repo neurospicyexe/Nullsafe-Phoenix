@@ -30,6 +30,10 @@ class SynthesisLoop:
     Call run_once() to execute a single synthesis pass (used in tests and standalone mode).
     """
 
+    # Hard floor: synthesis must not run faster than this regardless of env config.
+    # Prevents accidental SYNTHESIS_INTERVAL=300 from flooding wm_continuity_notes.
+    MIN_INTERVAL = 1800
+
     def __init__(
         self,
         halseth_client: HalsethClient,
@@ -39,7 +43,12 @@ class SynthesisLoop:
     ):
         self._halseth = halseth_client
         self._inference = inference_client
-        self._interval = interval_seconds
+        self._interval = max(interval_seconds, self.MIN_INTERVAL)
+        if self._interval != interval_seconds:
+            logger.warning(
+                f"[synthesis] interval_seconds={interval_seconds} below floor {self.MIN_INTERVAL}; "
+                f"using {self.MIN_INTERVAL}s"
+            )
         self._dry_run = dry_run
         self._task: Optional[asyncio.Task] = None
 

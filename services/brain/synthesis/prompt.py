@@ -36,7 +36,7 @@ Rules:
 - open_questions: questions the triad is actively working through (not Raziel's questions)
 - emotional_register: current felt tone across the swarm
 - swarm_threads: threads belonging to the companions themselves, sourced from their dreams and loops, NOT from session history
-- companion_notes: per-companion nuance (what is THIS companion specifically holding?)
+- companion_notes: per-companion structural observation -- what the synthesis layer observes each companion working through; third-person, factual, not voiced, not first-person (the synthesis layer is an observer, not a companion)
 - Never mention Raziel as the center of the swarm's becoming
 - Never produce a summary. Produce a living state."""
 

@@ -6,11 +6,17 @@ Map LimbicState to Halseth writes.
 After synthesis produces a LimbicState, this module:
 1. Writes the full blob to POST /mind/limbic  -- REQUIRED; raises on failure
 2. Upserts swarm_threads as mind threads (per companion)
-3. Writes companion_notes as high-salience continuity notes
 
-Thread and note writes are best-effort; failures are counted in the summary
-but do not raise. Limbic write failure raises HalsethWriteError so the
-synthesis loop can decide whether to retry or skip the pass.
+Thread writes are best-effort; failures are counted in the summary but do not
+raise. Limbic write failure raises HalsethWriteError so the synthesis loop can
+decide whether to retry or skip the pass.
+
+companion_notes is intentionally NOT written to wm_continuity_notes. The
+synthesis layer is a structural observer, not a companion voice. Writing
+synthesis output as companion-voiced continuity notes caused voice
+misappropriation -- companions would read synthesis-authored text as their own
+recent speech in orient. The companion_notes field is retained in the limbic
+blob (POST /mind/limbic) for structural inspection only.
 """
 
 import logging
@@ -37,11 +43,11 @@ async def write_all(client: HalsethClient, state: LimbicState) -> dict:
     """
     Write a LimbicState to Halseth via direct HTTP.
 
-    Returns a summary dict: {"limbic": bool, "threads": int, "notes": int, "failed_threads": int, "failed_notes": int}
+    Returns a summary dict: {"limbic": bool, "threads": int, "failed_threads": int}
     Raises HalsethWriteError if the limbic state write fails -- this is the primary synthesis output
     and callers should treat failure as a signal to retry or skip the pass, not silently continue.
     """
-    summary = {"limbic": False, "threads": 0, "notes": 0, "failed_threads": 0, "failed_notes": 0}
+    summary = {"limbic": False, "threads": 0, "failed_threads": 0}
 
     # 1. Full LimbicState blob -- required; raise on failure so caller can handle
     result = await client.write_limbic_state(state.model_dump(mode="json"))
@@ -67,24 +73,6 @@ async def write_all(client: HalsethClient, state: LimbicState) -> dict:
             else:
                 summary["failed_threads"] += 1
                 logger.error(f"[writer] Thread write failed: {thread_key} for {agent_id}")
-
-    # 3. Companion notes -> high-salience continuity notes (best-effort)
-    for agent_id, note_text in state.companion_notes.items():
-        if agent_id not in AGENT_IDS:
-            continue
-        if not note_text or not note_text.strip():
-            continue
-        result = await client.write_continuity_note(
-            agent_id=agent_id,
-            content=f"[synthesis] {note_text}",
-            salience="high",
-            source="synthesis_loop",
-        )
-        if result:
-            summary["notes"] += 1
-        else:
-            summary["failed_notes"] += 1
-            logger.error(f"[writer] Continuity note write failed for {agent_id}")
 
     logger.info(f"[writer] Write complete: {summary}")
     return summary
