@@ -240,7 +240,7 @@ async def test_routing_silenced_companion_skips_inference():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": false, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt):
+    async def fake_infer(companion_id, pkt, prior_replies=None):
         inference_calls.append(companion_id)
         return f"{companion_id} reply"
 
@@ -269,7 +269,7 @@ async def test_inference_exception_doesnt_blank_others():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt):
+    async def fake_infer(companion_id, pkt, prior_replies=None):
         if companion_id == "cypher":
             raise RuntimeError("API timeout")
         return f"{companion_id} reply"
@@ -316,3 +316,170 @@ def test_routing_prompt_addressed_suppresses_depth_bias():
     prompt = ev._build_routing_prompt(packet, companions)
     assert "drevan must be true" in prompt
     assert "Strongly prefer false" not in prompt
+
+
+# ── Sequential inference + peer context ──────────────────────────────────────
+
+def test_determine_order_addressed_first():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    packet = _make_packet(metadata={"channel_id": "ch-test", "history": [], "addressed_companion": "cypher,drevan"})
+    order = ev._determine_order(packet, ["drevan", "cypher", "gaia"])
+    # addressed companions first in parse order, gaia ambient last
+    assert order[0] == "cypher"
+    assert order[1] == "drevan"
+    assert "gaia" in order
+
+
+def test_determine_order_drevan_tiebreaker():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    # Message with no lane keywords -- drevan should lead ambient group
+    packet = _make_packet(message="xyz abc", metadata={"channel_id": "ch-test", "history": []})
+    order = ev._determine_order(packet, ["cypher", "drevan", "gaia"])
+    assert order[0] == "drevan"
+
+
+def test_determine_order_cypher_leads_on_scored_message():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    # "debugging" appears literally in cypher's VOICE_SUMMARIES; drevan scores 0 -- cypher must lead
+    packet = _make_packet(message="help me with debugging this", metadata={"channel_id": "ch-test", "history": []})
+    order = ev._determine_order(packet, ["drevan", "cypher", "gaia"])
+    assert order[0] == "cypher"
+
+
+@pytest.mark.asyncio
+async def test_sequential_inference_order_respected():
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    ev = SwarmEvaluator(CompanionCooldown(), identity_loader=MagicMock())
+    call_order = []
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": false}'
+
+    async def fake_infer(companion_id, pkt, prior_replies=None):
+        call_order.append(companion_id)
+        return f"{companion_id} reply"
+
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    # address cypher first so cypher leads
+    packet = _make_packet(
+        metadata={"channel_id": "ch-test", "history": [], "addressed_companion": "cypher"}
+    )
+    reply = await ev.evaluate(packet)
+
+    assert call_order[0] == "cypher"
+    assert "drevan" in call_order
+    assert "gaia" not in call_order
+    assert reply.priority_order[0] == "cypher"
+
+
+@pytest.mark.asyncio
+async def test_peer_context_injected_for_second_companion():
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    ev = SwarmEvaluator(CompanionCooldown(), identity_loader=MagicMock())
+    received_prior: dict = {}
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": false}'
+
+    async def fake_infer(companion_id, pkt, prior_replies=None):
+        received_prior[companion_id] = list(prior_replies) if prior_replies else None
+        return f"{companion_id} reply"
+
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    packet = _make_packet(
+        metadata={"channel_id": "ch-test", "history": [], "addressed_companion": "drevan,cypher"}
+    )
+    await ev.evaluate(packet)
+
+    # drevan is first -- no prior context
+    assert received_prior.get("drevan") is None
+    # cypher is second -- should see drevan's reply
+    assert received_prior.get("cypher") is not None
+    assert received_prior["cypher"][0][0] == "drevan"
+    assert received_prior["cypher"][0][1] == "drevan reply"
+
+
+@pytest.mark.asyncio
+async def test_sequential_exception_doesnt_block_next_or_lose_prior():
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    ev = SwarmEvaluator(CompanionCooldown(), identity_loader=MagicMock())
+    received_prior: dict = {}
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": true}'
+
+    async def fake_infer(companion_id, pkt, prior_replies=None):
+        received_prior[companion_id] = list(prior_replies) if prior_replies else None
+        if companion_id == "cypher":
+            raise RuntimeError("timeout")
+        return f"{companion_id} reply"
+
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    # drevan leads, cypher second (throws), gaia third
+    packet = _make_packet(
+        metadata={"channel_id": "ch-test", "history": [], "addressed_companion": "drevan,cypher"}
+    )
+    reply = await ev.evaluate(packet)
+
+    assert reply.responses["drevan"] == "drevan reply"
+    assert reply.responses["cypher"] is None  # threw
+    assert reply.responses["gaia"] == "gaia reply"
+    # gaia only sees drevan's reply (cypher threw, so no cypher entry in prior_replies)
+    assert received_prior["gaia"] is not None
+    peer_ids = [pid for pid, _ in received_prior["gaia"]]
+    assert "drevan" in peer_ids
+    assert "cypher" not in peer_ids
+
+
+@pytest.mark.asyncio
+async def test_priority_order_in_swarm_reply():
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    ev = SwarmEvaluator(CompanionCooldown(), identity_loader=MagicMock())
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": false}'
+
+    async def fake_infer(companion_id, pkt, prior_replies=None):
+        return f"{companion_id} reply"
+
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    packet = _make_packet(
+        metadata={"channel_id": "ch-test", "history": [], "addressed_companion": "cypher,drevan"}
+    )
+    reply = await ev.evaluate(packet)
+
+    assert reply.priority_order == ["cypher", "drevan"]
+
+
+@pytest.mark.asyncio
+async def test_priority_order_empty_when_no_active():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+
+    async def fake_routing(prompt):
+        return '{"drevan": false, "cypher": false, "gaia": false}'
+
+    ev._call_routing = fake_routing
+    packet = _make_packet()
+    reply = await ev.evaluate(packet)
+
+    assert reply.priority_order == []

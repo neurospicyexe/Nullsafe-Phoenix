@@ -104,18 +104,26 @@ class SwarmEvaluator:
 
         logger.info(f"[swarm] routing: {routing} | active after cooldown: {active}")
 
-        # Phase 2: per-companion inference (temp=INFERENCE_TEMPERATURE, full identity, parallel)
+        # Phase 2: per-companion inference (sequential; each reply feeds peer context to the next)
         responses: Dict[str, Optional[str]] = {c: None for c in companions}
+        order: List[str] = []
         if active:
             if self._identity_loader:
-                tasks = [self._infer_companion(c, packet) for c in active]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for companion_id, result in zip(active, results):
-                    if isinstance(result, str):
-                        responses[companion_id] = result
-                    else:
-                        if isinstance(result, Exception):
-                            logger.warning(f"[{companion_id}] inference failed: {result}")
+                order = self._determine_order(packet, active)
+                prior_replies: List[tuple[str, str]] = []
+                for companion_id in order:
+                    try:
+                        result = await self._infer_companion(
+                            companion_id, packet,
+                            prior_replies=prior_replies if prior_replies else None,
+                        )
+                        if result:
+                            responses[companion_id] = result
+                            prior_replies.append((companion_id, result))
+                        else:
+                            responses[companion_id] = None
+                    except Exception as e:
+                        logger.warning(f"[{companion_id}] inference failed: {e}")
                         responses[companion_id] = None
             else:
                 # Legacy fallback: single call generates all responses in one JSON blob
@@ -135,8 +143,42 @@ class SwarmEvaluator:
             thread_id=packet.thread_id,
             responses=responses,
             depth=packet.depth,
+            priority_order=order,
             trace={"active_companions": active},
         )
+
+    # ── Inference ordering ────────────────────────────────────────────────────
+
+    def _determine_order(self, packet: ThoughtPacket, active: List[str]) -> List[str]:
+        """Return active companions in inference priority order.
+
+        1. Directly addressed companions (left-to-right parse order from user message).
+        2. Ambient companions ranked by keyword overlap with VOICE_SUMMARIES.
+           Drevan is the tiebreaker (widest default lane).
+        """
+        addressed_str: str = packet.metadata.get("addressed_companion", "") or ""
+        if addressed_str:
+            addressed = [a.strip() for a in addressed_str.split(",") if a.strip() in active]
+        else:
+            addressed = []
+        remaining = [c for c in active if c not in addressed]
+
+        if len(remaining) > 1:
+            msg_lower = packet.message.lower()
+            lane_keywords: Dict[str, set] = {
+                c: {w.rstrip(",.;:") for w in VOICE_SUMMARIES.get(c, "").lower().split()}
+                for c in remaining
+            }
+            def _score(c: str) -> int:
+                return sum(1 for w in msg_lower.split() if w in lane_keywords[c])
+            # drevan is tiebreaker (stable sort keeps existing order on equal score)
+            remaining = sorted(remaining, key=_score, reverse=True)
+            # Guarantee drevan leads ambient group only when ALL scores tie at 0
+            if all(_score(c) == 0 for c in remaining) and "drevan" in remaining:
+                remaining.remove("drevan")
+                remaining.insert(0, "drevan")
+
+        return addressed + remaining
 
     # ── Phase 1: routing ──────────────────────────────────────────────────────
 
@@ -246,10 +288,26 @@ class SwarmEvaluator:
     # ── Phase 2: per-companion inference ─────────────────────────────────────
 
     async def _infer_companion(
-        self, companion_id: str, packet: ThoughtPacket
+        self,
+        companion_id: str,
+        packet: ThoughtPacket,
+        prior_replies: Optional[List[tuple[str, str]]] = None,
     ) -> Optional[str]:
         identity, _ = self._identity_loader.load_identity(companion_id)  # type: ignore[union-attr]
         system_prompt = self._identity_loader.construct_prompt_context(identity)  # type: ignore[union-attr]
+
+        if prior_replies:
+            lines = ["\n\n──── TRIAD CONTEXT ────"]
+            for peer_id, peer_text in prior_replies:
+                lines.append(
+                    f"[{peer_id.capitalize()} has already spoken to this message]:\n"
+                    f'"{peer_text}"\n'
+                    f"What can ONLY you add? Stay in your lane. "
+                    f"Build on what they said -- don't restate it."
+                )
+            lines.append("────────────────────────")
+            system_prompt = system_prompt + "\n".join(lines)
+
         model = self._companion_models.get(companion_id, self._default_model)
         temperature = self._companion_temps.get(companion_id, INFERENCE_TEMPERATURE)
 

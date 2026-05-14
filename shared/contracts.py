@@ -132,6 +132,10 @@ class SwarmReply(BaseModel):
     depth: int = Field(0, description="Chain depth at time of evaluation")
     status: Literal["ok", "error"] = Field("ok", description="Evaluation status")
     trace: Optional[Dict[str, Any]] = Field(None, description="Debug trace")
+    priority_order: List[str] = Field(
+        default_factory=list,
+        description="Inference order; bots stagger posting by position in this list",
+    )
 
     def to_json(self) -> str:
         return self.model_dump_json()
