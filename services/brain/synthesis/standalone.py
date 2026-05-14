@@ -74,7 +74,10 @@ def main() -> None:
         dry_run=args.dry_run,
     )
 
-    logger.info(f"Synthesis loop configured: halseth={halseth_url} interval={interval}s dry_run={args.dry_run}")
+    logger.info(
+        f"Synthesis loop configured: halseth={halseth_url} "
+        f"interval_configured={interval}s interval_effective={loop._interval}s dry_run={args.dry_run}"
+    )
 
     if args.once:
         asyncio.run(loop.run_once())
