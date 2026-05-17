@@ -10,7 +10,13 @@ High-frequency writes use direct HTTP endpoints (stm, persona-blocks, human-bloc
 import json
 import logging
 import math
+from datetime import datetime
 from typing import Optional
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _CST = _ZoneInfo("America/Chicago")
+except Exception:
+    _CST = None
 
 import httpx
 
@@ -403,6 +409,13 @@ def format_orient_context(orient: Optional[dict]) -> str:
         return ""
 
     parts: list[str] = []
+    try:
+        now_cst = datetime.now(_CST) if _CST else datetime.utcnow()
+        tz_label = "CST" if _CST else "UTC"
+        parts.append(f"[Now: {now_cst.strftime('%A, %B %d, %Y at %I:%M %p')} {tz_label}]")
+    except Exception:
+        pass
+
     if orient.get("synthesis_summary"):
         parts.append(f"## Recent\n{orient['synthesis_summary'][:600]}")
     if orient.get("ground_handoff"):
