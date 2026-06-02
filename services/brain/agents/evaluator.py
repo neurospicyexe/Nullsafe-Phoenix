@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -16,6 +17,7 @@ from services.brain.brain_config import Config
 from services.brain.config.channel_config import get_companions_for_channel
 from services.brain.agents.cooldown import CompanionCooldown
 from services.brain.agents.providers import (
+    MODEL_REGISTRY,
     ProviderConfig,
     build_request,
     parse_response,
@@ -81,6 +83,11 @@ class SwarmEvaluator:
         }
         # Routing stays a cheap classifier call -- own knob, defaults to DeepSeek.
         self._routing_model_key = os.getenv("ROUTING_MODEL") or "deepseek-chat"
+        # Live model switching: `cy: model kimi-k2` in Discord writes companion_settings
+        # in Halseth; Brain reads each companion's active_model (cached) and lets it
+        # override the env default. TTL bounds how fast a Discord switch takes effect.
+        self._model_cache: Dict[str, tuple[float, Optional[str]]] = {}
+        self._model_cache_ttl = int(os.getenv("MODEL_CACHE_TTL_S", "60"))
         self._companion_temps = {
             "drevan": float(os.getenv("DREVAN_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
             "cypher": float(os.getenv("CYPHER_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
@@ -305,6 +312,31 @@ class SwarmEvaluator:
             f"Example: {example}"
         )
 
+    async def _get_active_model_cached(self, companion_id: str) -> Optional[str]:
+        """This companion's Discord-set model key from Halseth, TTL-cached. None on miss."""
+        client = self._halseth_clients.get(companion_id)
+        if client is None:
+            return None
+        now = time.monotonic()
+        cached = self._model_cache.get(companion_id)
+        if cached and now < cached[0]:
+            return cached[1]
+        try:
+            model = await client.get_active_model()
+        except Exception as e:
+            logger.warning(f"[{companion_id}] get_active_model failed: {e}")
+            model = None
+        self._model_cache[companion_id] = (now + self._model_cache_ttl, model)
+        return model
+
+    async def _effective_model_key(self, companion_id: str) -> str:
+        """The model key to use for a companion: the Discord-set override (only when it
+        is a known registry key) takes precedence over the env default."""
+        override = await self._get_active_model_cached(companion_id)
+        if override and override in MODEL_REGISTRY:
+            return override
+        return self._companion_model_keys.get(companion_id, self._default_model_key)
+
     def _resolve(self, model_key: str, *, label: str = "") -> tuple[str, str]:
         """Resolve a model key to (provider, model), falling back to DeepSeek when the
         configured provider has no credential -- a misconfigured KIMI_API_KEY must not
@@ -400,7 +432,7 @@ class SwarmEvaluator:
             system_prompt = system_prompt + "\n".join(lines)
 
         provider, model = self._resolve(
-            self._companion_model_keys.get(companion_id, self._default_model_key),
+            await self._effective_model_key(companion_id),
             label=companion_id,
         )
         # Honor the bot's dynamic temperature for the sender (message-register-driven,

@@ -377,6 +377,26 @@ class HalsethClient:
             logger.warning(f"[halseth] write_conclusion failed: {e}")
             return None
 
+    async def get_active_model(self) -> Optional[str]:
+        """Read this companion's Discord-set model key from companion_settings.
+
+        GET /companion/settings/{companion_id} returns a flat {key: value} map; we
+        read `active_model` (the registry key the bot writes on `cy: model <key>`).
+        Returns None on miss / failure so the caller falls back to the env default.
+        """
+        try:
+            res = await self._client.get(
+                f"{self.url}/companion/settings/{self.companion_id}",
+                headers={"Authorization": f"Bearer {self.secret}"},
+            )
+            if res.status_code >= 300:
+                return None
+            val = res.json().get("active_model")
+            return val if isinstance(val, str) and val else None
+        except Exception as e:
+            logger.warning(f"[halseth] get_active_model failed: {e}")
+            return None
+
     async def stm_write(self, channel_id: str, role: str, content: str, author_name: Optional[str] = None) -> None:
         """Fire-and-forget STM write. Caller should catch exceptions."""
         res = await self._client.post(

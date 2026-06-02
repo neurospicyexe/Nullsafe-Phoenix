@@ -737,6 +737,66 @@ async def test_infer_falls_back_to_deepseek_when_provider_unconfigured():
     assert captured["json"]["model"] == "deepseek-chat"
 
 
+# ── Live model switching from Discord (cy: model <key>) ───────────────────────
+
+
+def _client_with_model(model_key):
+    from unittest.mock import AsyncMock, MagicMock
+    c = MagicMock()
+    c.get_active_model = AsyncMock(return_value=model_key)
+    return c
+
+
+@pytest.mark.asyncio
+async def test_effective_model_key_honors_discord_override():
+    ev = _make_infer_evaluator()
+    ev._halseth_clients = {"cypher": _client_with_model("kimi-k2")}
+    assert await ev._effective_model_key("cypher") == "kimi-k2"
+
+
+@pytest.mark.asyncio
+async def test_effective_model_key_falls_back_to_env_on_no_override():
+    ev = _make_infer_evaluator()
+    ev._halseth_clients = {"cypher": _client_with_model(None)}
+    ev._companion_model_keys["cypher"] = "deepseek-chat"
+    assert await ev._effective_model_key("cypher") == "deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_effective_model_key_ignores_unknown_override():
+    # A stale / bogus active_model must not silently route to a raw deepseek model.
+    ev = _make_infer_evaluator()
+    ev._halseth_clients = {"cypher": _client_with_model("not-a-real-key")}
+    ev._companion_model_keys["cypher"] = "deepseek-chat"
+    assert await ev._effective_model_key("cypher") == "deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_active_model_lookup_is_cached():
+    ev = _make_infer_evaluator()
+    client = _client_with_model("kimi-k2")
+    ev._halseth_clients = {"cypher": client}
+    await ev._effective_model_key("cypher")
+    await ev._effective_model_key("cypher")
+    client.get_active_model.assert_awaited_once()  # second call served from cache
+
+
+@pytest.mark.asyncio
+async def test_discord_override_routes_inference_to_kimi():
+    # End-to-end: Halseth says cypher=kimi-k2, key present -> swarm inference hits Kimi,
+    # overriding the env default (deepseek). This is `cy: model kimi-k2` taking effect live.
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    ev._providers.keys["kimi"] = "test-kimi-key"
+    ev._halseth_clients = {"cypher": _client_with_model("kimi-k2")}
+
+    packet = _make_packet(agent_id="cypher", metadata={"channel_id": "ch", "history": []})
+    await ev._infer_companion("cypher", packet)
+
+    assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert captured["json"]["model"] == "kimi-k2"
+
+
 @pytest.mark.asyncio
 async def test_priority_order_empty_when_no_active():
     os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
