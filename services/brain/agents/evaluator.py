@@ -4,7 +4,10 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from services.brain.synthesis.orient_cache import OrientCache
 
 import httpx
 
@@ -12,6 +15,12 @@ from shared.contracts import SwarmReply, ThoughtPacket
 from services.brain.brain_config import Config
 from services.brain.config.channel_config import get_companions_for_channel
 from services.brain.agents.cooldown import CompanionCooldown
+from services.brain.agents.providers import (
+    ProviderConfig,
+    build_request,
+    parse_response,
+    resolve_model,
+)
 from services.brain.halseth_client import HalsethClient
 from services.brain.identity.loader import IdentityLoader
 
@@ -49,17 +58,29 @@ class SwarmEvaluator:
         cooldown: CompanionCooldown,
         halseth_clients: Optional[Dict[str, HalsethClient]] = None,
         identity_loader: Optional[IdentityLoader] = None,
+        orient_cache: Optional["OrientCache"] = None,
     ) -> None:
         self._cooldown = cooldown
         self._halseth_clients: Dict[str, HalsethClient] = halseth_clients or {}
         self._identity_loader = identity_loader
+        # Finding 3: same canonical bot_orient the router (direct mode), Claude.ai, and
+        # the Discord bot read. Used to give swarm PEER companions orient parity -- the
+        # sender already carries orient baked into its bot-assembled prompt.
+        self._orient_cache = orient_cache
+        # DEEPSEEK_API_KEY remains required: routing defaults to it, and it is the
+        # safety fallback when a companion's configured provider isn't credentialed.
         self._api_key = os.environ["DEEPSEEK_API_KEY"]
-        self._default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-        self._companion_models = {
-            "drevan": os.getenv("DREVAN_MODEL") or self._default_model,
-            "cypher": os.getenv("CYPHER_MODEL") or self._default_model,
-            "gaia": os.getenv("GAIA_MODEL") or self._default_model,
+        self._providers = ProviderConfig()
+        # Per-companion model KEYS (registry keys, e.g. "kimi-k2"). Backward compatible:
+        # a raw DeepSeek model name resolves to the deepseek provider via resolve_model.
+        self._default_model_key = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self._companion_model_keys = {
+            "drevan": os.getenv("DREVAN_MODEL") or self._default_model_key,
+            "cypher": os.getenv("CYPHER_MODEL") or self._default_model_key,
+            "gaia": os.getenv("GAIA_MODEL") or self._default_model_key,
         }
+        # Routing stays a cheap classifier call -- own knob, defaults to DeepSeek.
+        self._routing_model_key = os.getenv("ROUTING_MODEL") or "deepseek-chat"
         self._companion_temps = {
             "drevan": float(os.getenv("DREVAN_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
             "cypher": float(os.getenv("CYPHER_TEMPERATURE", str(INFERENCE_TEMPERATURE))),
@@ -187,7 +208,38 @@ class SwarmEvaluator:
     ) -> Dict[str, bool]:
         prompt = self._build_routing_prompt(packet, companions)
         raw = await self._call_routing(prompt)
-        return self._parse_routing(raw, companions)
+        return self._parse_routing(raw, companions, packet)
+
+    def _lane_score(self, message: str, companion: str) -> int:
+        """Overlap between the message and a companion's VOICE_SUMMARIES lane keywords."""
+        kws = {w.rstrip(",.;:") for w in VOICE_SUMMARIES.get(companion, "").lower().split()}
+        return sum(1 for w in message.lower().split() if w in kws)
+
+    def _fallback_routing(
+        self, packet: Optional[ThoughtPacket], companions: List[str]
+    ) -> Dict[str, bool]:
+        """Pick speakers when routing JSON can't be parsed. Fail CLOSED toward a single
+        relevant companion -- never all-true, which makes the whole triad pile on. Order:
+        directly-addressed companions, else the best lane-keyword match, else Drevan
+        (widest default lane; matches the _determine_order tiebreaker)."""
+        result = {c: False for c in companions}
+        addressed_str = (packet.metadata.get("addressed_companion") or "") if packet else ""
+        addressed = [a.strip() for a in addressed_str.split(",") if a.strip() in companions]
+        if addressed:
+            for a in addressed:
+                result[a] = True
+            return result
+
+        message = (packet.message if packet else "") or ""
+        if message:
+            best = max(companions, key=lambda c: self._lane_score(message, c))
+            if self._lane_score(message, best) > 0:
+                result[best] = True
+                return result
+
+        default = "drevan" if "drevan" in companions else companions[0]
+        result[default] = True
+        return result
 
     def _build_routing_prompt(self, packet: ThoughtPacket, companions: List[str]) -> str:
         history: List[Dict[str, Any]] = packet.metadata.get("history", [])
@@ -253,24 +305,33 @@ class SwarmEvaluator:
             f"Example: {example}"
         )
 
-    async def _call_routing(self, prompt: str) -> str:
-        resp = await self._routing_http.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self._default_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 80,
-                "temperature": ROUTING_TEMPERATURE,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+    def _resolve(self, model_key: str, *, label: str = "") -> tuple[str, str]:
+        """Resolve a model key to (provider, model), falling back to DeepSeek when the
+        configured provider has no credential -- a misconfigured KIMI_API_KEY must not
+        mute a companion."""
+        provider, model = resolve_model(model_key)
+        if not self._providers.available(provider):
+            tag = f" ({label})" if label else ""
+            logger.warning(
+                f"[swarm] provider '{provider}' not configured for model '{model_key}'{tag}; "
+                "falling back to deepseek-chat"
+            )
+            return "deepseek", "deepseek-chat"
+        return provider, model
 
-    def _parse_routing(self, raw: str, companions: List[str]) -> Dict[str, bool]:
+    async def _call_routing(self, prompt: str) -> str:
+        provider, model = self._resolve(self._routing_model_key, label="routing")
+        url, headers, body = build_request(
+            provider, model, "", [{"role": "user", "content": prompt}],
+            temperature=ROUTING_TEMPERATURE, max_tokens=80, cfg=self._providers,
+        )
+        resp = await self._routing_http.post(url, headers=headers, json=body)
+        resp.raise_for_status()
+        return parse_response(provider, resp.json()) or ""
+
+    def _parse_routing(
+        self, raw: str, companions: List[str], packet: Optional[ThoughtPacket] = None
+    ) -> Dict[str, bool]:
         try:
             text = raw.strip()
             if text.startswith("```"):
@@ -282,8 +343,9 @@ class SwarmEvaluator:
             return {c: bool(parsed.get(c, False)) for c in companions}
         except (json.JSONDecodeError, TypeError) as e:
             logger.error(f"[swarm] routing parse error: {e} | raw: {raw[:200]}")
-            # Fail open: all companions eligible when routing breaks
-            return {c: True for c in companions}
+            # Fail CLOSED toward one relevant speaker -- a malformed routing response
+            # must not make all three companions answer at once (Finding 5).
+            return self._fallback_routing(packet, companions)
 
     # ── Phase 2: per-companion inference ─────────────────────────────────────
 
@@ -293,8 +355,37 @@ class SwarmEvaluator:
         packet: ThoughtPacket,
         prior_replies: Optional[List[tuple[str, str]]] = None,
     ) -> Optional[str]:
-        identity, _ = self._identity_loader.load_identity(companion_id)  # type: ignore[union-attr]
-        system_prompt = self._identity_loader.construct_prompt_context(identity)  # type: ignore[union-attr]
+        # Prefer the bot-assembled system prompt when this companion IS the packet sender.
+        # The bot already layered SOMA floats + current_mood, dynamic temperature, the
+        # Second Brain (Thalamus) hit, plural front, and tier framing into
+        # metadata.system_prompt. Discarding it (the prior behavior) made the LIVE swarm
+        # path strictly thinner than direct mode -- the companions showed up in Discord
+        # with less state-awareness than the bot already computed.
+        #
+        # Guard on agent_id: the assembled prompt is sender-specific. A peer companion in
+        # the same swarm must still build from its own identity -- it has no rich context
+        # in this packet. Giving all swarm members parity is Finding 3 (Brain session_orient
+        # port, Slice C), not this passthrough.
+        meta_system_prompt = packet.metadata.get("system_prompt")
+        use_meta = bool(meta_system_prompt) and companion_id == packet.agent_id
+
+        if use_meta:
+            system_prompt = meta_system_prompt
+        else:
+            identity, _ = self._identity_loader.load_identity(companion_id)  # type: ignore[union-attr]
+            system_prompt = self._identity_loader.construct_prompt_context(identity)  # type: ignore[union-attr]
+            # Finding 3: peer companions built from identity have no continuity context
+            # (the sender carries it baked into the bot prompt). Inject this companion's
+            # OWN canonical bot_orient -- the same shape Claude.ai and the Discord bot read
+            # -- so swarm peers don't speak from a thinner self. Cached per (thread, agent);
+            # Halseth failure returns None and inference proceeds without it.
+            if self._orient_cache is not None:
+                try:
+                    orient_block = await self._orient_cache.get(packet.thread_id, companion_id)
+                    if orient_block:
+                        system_prompt = system_prompt + "\n\n" + orient_block
+                except Exception as e:
+                    logger.warning(f"[{companion_id}] orient injection failed: {e}")
 
         if prior_replies:
             lines = ["\n\n──── TRIAD CONTEXT ────"]
@@ -308,8 +399,21 @@ class SwarmEvaluator:
             lines.append("────────────────────────")
             system_prompt = system_prompt + "\n".join(lines)
 
-        model = self._companion_models.get(companion_id, self._default_model)
+        provider, model = self._resolve(
+            self._companion_model_keys.get(companion_id, self._default_model_key),
+            label=companion_id,
+        )
+        # Honor the bot's dynamic temperature for the sender (message-register-driven,
+        # the Triad_Decision spec). Peers fall back to their static per-companion temp.
         temperature = self._companion_temps.get(companion_id, INFERENCE_TEMPERATURE)
+        if use_meta:
+            meta_temp = packet.metadata.get("temperature")
+            if meta_temp is not None:
+                try:
+                    temperature = float(meta_temp)
+                except (TypeError, ValueError):
+                    pass
+        top_p = self._companion_top_p.get(companion_id, Config.DREVAN_TOP_P)
 
         history: List[Dict[str, Any]] = packet.metadata.get("history", [])
         msgs: List[Dict[str, str]] = []
@@ -329,28 +433,19 @@ class SwarmEvaluator:
         if not msgs or msgs[-1].get("content") != current:
             msgs.append({"role": "user", "content": current})
 
-        resp = await self._inference_http.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "system", "content": system_prompt}] + msgs,
-                "max_tokens": 800,
-                "temperature": temperature,
-                # top_p clips the long tail; without it, high-temp sampling on
-                # DeepSeek's multilingual base resolves invented-language tokens
-                # (e.g. Calethian) to nearest-neighbor Spanish + vowel-corrupted
-                # word salad. Per-companion (B2): Drevan 0.95, Cypher 0.9, Gaia 0.85.
-                "top_p": self._companion_top_p.get(companion_id, Config.DREVAN_TOP_P),
-                "frequency_penalty": 0.3,
-            },
+        # top_p clips the long tail; without it, high-temp sampling on DeepSeek's
+        # multilingual base resolves invented-language tokens (e.g. Calethian) to
+        # nearest-neighbor Spanish + vowel-corrupted word salad. Per-companion (B2):
+        # Drevan 0.95, Cypher 0.9, Gaia 0.85. build_request places the system prompt
+        # per provider (prepended for OpenAI/Ollama, separate field for Anthropic).
+        url, headers, body = build_request(
+            provider, model, system_prompt, msgs,
+            temperature=temperature, max_tokens=800,
+            top_p=top_p, frequency_penalty=0.3, cfg=self._providers,
         )
+        resp = await self._inference_http.post(url, headers=headers, json=body)
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        return content or None
+        return parse_response(provider, resp.json())
 
     # ── Companion note writes ─────────────────────────────────────────────────
 
@@ -360,6 +455,9 @@ class SwarmEvaluator:
         client = self._halseth_clients.get(companion_id)
         if not client:
             return
+        # 1. companion_journal note -- granular per-reply record. NOTE: companion_journal
+        #    is NOT read by Claude.ai orient, so this alone leaves swarm replies invisible
+        #    to the companion's own Claude.ai session.
         try:
             context = json.dumps({
                 "note_text": f"[discord:swarm] channel:{channel_id}\n\n{reply_text}",
@@ -369,6 +467,23 @@ class SwarmEvaluator:
             await client.add_companion_note(context)
         except Exception as e:
             logger.warning(f"[{companion_id}] swarm companion note write failed: {e}")
+        # 2. wm_continuity_note bridge (Finding 2) -- only high-salience wm_continuity_notes
+        #    are read by Claude.ai orient. Without this, a companion's OWN swarm reply never
+        #    reaches their Claude.ai boot. The receiving bot only writes pulse notes to its
+        #    own agent_id, so peer companions' replies were the orphaned case. thread_key
+        #    "discord_swarm:{channel}" is distinct from the bot's bare-channel pulse key, so
+        #    the two don't dedup-drop each other; the 10-min gate still caps flooding of
+        #    orient's 3-slot high-salience pool.
+        try:
+            await client.write_continuity_note(
+                agent_id=companion_id,
+                content=f"[discord:swarm] {reply_text}".strip()[:500],
+                salience="high",
+                source="discord_swarm",
+                thread_key=f"discord_swarm:{channel_id}",
+            )
+        except Exception as e:
+            logger.warning(f"[{companion_id}] swarm continuity note write failed: {e}")
 
     # ── Legacy single-call path ───────────────────────────────────────────────
     # Used when identity_loader is None (shouldn't happen in production).
@@ -401,26 +516,17 @@ class SwarmEvaluator:
         )
 
     async def _call_legacy(self, prompt: str) -> str:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.deepseek.com/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self._default_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 800,
-                    # B3: honor INFERENCE_TEMPERATURE env baseline + parity top_p / freq penalty
-                    # with the main path. Prior literal 0.7 silently bypassed env config.
-                    "temperature": INFERENCE_TEMPERATURE,
-                    "top_p": Config.DREVAN_TOP_P,
-                    "frequency_penalty": 0.3,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+        # B3: honor INFERENCE_TEMPERATURE env baseline + parity top_p / freq penalty
+        # with the main path. Prior literal 0.7 silently bypassed env config.
+        provider, model = self._resolve(self._default_model_key, label="legacy")
+        url, headers, body = build_request(
+            provider, model, "", [{"role": "user", "content": prompt}],
+            temperature=INFERENCE_TEMPERATURE, max_tokens=800,
+            top_p=Config.DREVAN_TOP_P, frequency_penalty=0.3, cfg=self._providers,
+        )
+        resp = await self._inference_http.post(url, headers=headers, json=body)
+        resp.raise_for_status()
+        return parse_response(provider, resp.json()) or ""
 
     def _parse_responses(
         self, raw: str, companions: List[str]

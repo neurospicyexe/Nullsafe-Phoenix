@@ -306,19 +306,27 @@ class HalsethClient:
             return None
 
     async def write_continuity_note(self, agent_id: str, content: str,
-                                     salience: str = "high", source: str = "synthesis_loop") -> Optional[dict]:
-        """POST /mind/note -- write a continuity note."""
+                                     salience: str = "high", source: str = "synthesis_loop",
+                                     thread_key: Optional[str] = None) -> Optional[dict]:
+        """POST /mind/note -- write a continuity note.
+
+        When thread_key is set, Halseth's addNote gate collapses repeat writes to the
+        same agent_id + thread_key within a 10-minute window (flood protection).
+        """
+        body: dict = {
+            "agent_id": agent_id,
+            "content": content,
+            "salience": salience,
+            "source": source,
+            "actor": "system",
+            "note_type": "continuity",
+        }
+        if thread_key:
+            body["thread_key"] = thread_key
         try:
             res = await self._client.post(
                 f"{self.url}/mind/note",
-                json={
-                    "agent_id": agent_id,
-                    "content": content,
-                    "salience": salience,
-                    "source": source,
-                    "actor": "system",
-                    "note_type": "continuity",
-                },
+                json=body,
                 headers={"Authorization": f"Bearer {self.secret}"},
             )
             if res.status_code >= 300:

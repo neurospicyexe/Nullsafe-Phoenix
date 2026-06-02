@@ -1,0 +1,188 @@
+"""
+Multi-provider inference dispatch for the Brain swarm path.
+
+Python mirror of packages/shared/src/models.ts (ALL_MODELS) + the per-provider
+adapters in packages/shared/src/inference.ts. Lets the SwarmEvaluator voice each
+companion with any configured provider (DeepSeek, Kimi, Groq, OpenAI, Anthropic,
+LM Studio, Ollama) instead of being hardcoded to DeepSeek.
+
+Design split: this module is pure (URL + headers + body construction, response
+parsing). The evaluator owns the persistent httpx clients and posts the request,
+so connection reuse / timeout profiles stay where they were.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List, Optional, Tuple
+
+# key -> (provider, model_name). Mirror of ALL_MODELS in models.ts -- keep in sync.
+MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
+    "deepseek-chat":     ("deepseek",  "deepseek-chat"),
+    "deepseek-reasoner": ("deepseek",  "deepseek-reasoner"),
+    "llama-3.3-70b":     ("groq",      "llama-3.3-70b-versatile"),
+    "gemma-4":           ("lmstudio",  "gemma-4"),
+    "mistral-large-3":   ("lmstudio",  "mistral-large-3"),
+    "kimi-k2":           ("kimi",      "kimi-k2"),
+    "kimi-128k":         ("kimi",      "moonshot-v1-128k"),
+    "gpt-4o":            ("openai",    "gpt-4o"),
+    "gpt-4o-mini":       ("openai",    "gpt-4o-mini"),
+    "claude-sonnet":     ("anthropic", "claude-sonnet-4-6"),
+    "claude-haiku":      ("anthropic", "claude-haiku-4-5-20251001"),
+    "ollama-local":      ("ollama",    "llama3.2"),
+}
+
+# Providers that speak the OpenAI /chat/completions wire format.
+_OPENAI_COMPATIBLE = {"deepseek", "kimi", "groq", "openai", "lmstudio"}
+
+_OPENAI_BASE_URLS = {
+    "deepseek": "https://api.deepseek.com/chat/completions",
+    "kimi":     "https://api.moonshot.cn/v1/chat/completions",
+    "groq":     "https://api.groq.com/openai/v1/chat/completions",
+    "openai":   "https://api.openai.com/v1/chat/completions",
+}
+
+
+def resolve_model(key: str) -> Tuple[str, str]:
+    """Map a model key to (provider, model_name).
+
+    Unknown keys are treated as a bare DeepSeek model name -- this preserves the
+    prior behavior where DREVAN_MODEL/CYPHER_MODEL/GAIA_MODEL held a raw DeepSeek
+    model string (e.g. "deepseek-chat", "deepseek-reasoner").
+    """
+    if key in MODEL_REGISTRY:
+        return MODEL_REGISTRY[key]
+    return ("deepseek", key)
+
+
+class ProviderConfig:
+    """API keys + local URLs, read from the same env vars the Discord bots use."""
+
+    def __init__(self, env: Optional[Dict[str, str]] = None) -> None:
+        e = env if env is not None else os.environ
+        self.keys: Dict[str, Optional[str]] = {
+            "deepseek":  e.get("DEEPSEEK_API_KEY"),
+            "kimi":      e.get("KIMI_API_KEY"),
+            "groq":      e.get("GROQ_API_KEY"),
+            "openai":    e.get("OPENAI_API_KEY"),
+            "anthropic": e.get("ANTHROPIC_API_KEY"),
+        }
+        self.urls: Dict[str, Optional[str]] = {
+            "lmstudio": (e.get("LMSTUDIO_URL") or "").rstrip("/") or None,
+            "ollama":   (e.get("OLLAMA_URL") or "").rstrip("/") or None,
+        }
+
+    def available(self, provider: str) -> bool:
+        """True when this provider has the credential / URL it needs to be called."""
+        if provider in ("lmstudio", "ollama"):
+            return self.urls.get(provider) is not None
+        if provider in self.keys:
+            return bool(self.keys.get(provider))
+        return False
+
+
+def build_request(
+    provider: str,
+    model: str,
+    system_prompt: str,
+    messages: List[Dict[str, str]],
+    *,
+    temperature: float,
+    max_tokens: int,
+    top_p: Optional[float] = None,
+    frequency_penalty: Optional[float] = None,
+    cfg: ProviderConfig,
+) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
+    """Construct (url, headers, json_body) for a provider.
+
+    `messages` is the non-system turn list; the system prompt is placed where each
+    provider expects it (prepended for OpenAI/Ollama, separate field for Anthropic).
+    An empty system_prompt is omitted (used by the routing call).
+    Raises ValueError when the provider is unknown or its credential is missing.
+    """
+    if provider in _OPENAI_COMPATIBLE:
+        if provider == "lmstudio":
+            base = cfg.urls.get("lmstudio")
+            if not base:
+                raise ValueError("missing LMSTUDIO_URL for provider 'lmstudio'")
+            url = f"{base}/v1/chat/completions"
+            headers = {"Content-Type": "application/json"}
+        else:
+            url = _OPENAI_BASE_URLS[provider]
+            key = cfg.keys.get(provider)
+            if not key:
+                raise ValueError(f"missing API key for provider '{provider}'")
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+
+        msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": msgs,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if top_p is not None:
+            body["top_p"] = top_p
+        if frequency_penalty is not None:
+            body["frequency_penalty"] = frequency_penalty
+        return url, headers, body
+
+    if provider == "anthropic":
+        key = cfg.keys.get("anthropic")
+        if not key:
+            raise ValueError("missing API key for provider 'anthropic'")
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+        }
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            # Anthropic requires temperature in [0, 1]; our inference baseline (1.3)
+            # would 400. Clamp so a high-temp companion (Drevan) doesn't break here.
+            "temperature": min(temperature, 1.0),
+        }
+        if system_prompt:
+            body["system"] = system_prompt
+        if top_p is not None:
+            body["top_p"] = top_p
+        return url, headers, body
+
+    if provider == "ollama":
+        base = cfg.urls.get("ollama")
+        if not base:
+            raise ValueError("missing OLLAMA_URL for provider 'ollama'")
+        url = f"{base}/api/chat"
+        headers = {"Content-Type": "application/json"}
+        msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages
+        options: Dict[str, Any] = {"temperature": temperature}
+        if top_p is not None:
+            options["top_p"] = top_p
+        body = {"model": model, "messages": msgs, "stream": False, "options": options}
+        return url, headers, body
+
+    raise ValueError(f"unknown provider '{provider}'")
+
+
+def parse_response(provider: str, data: Dict[str, Any]) -> Optional[str]:
+    """Extract reply text from a provider response body. None on empty/malformed."""
+    if provider == "anthropic":
+        for block in data.get("content") or []:
+            if block.get("type") == "text":
+                txt = (block.get("text") or "").strip()
+                return txt or None
+        return None
+
+    if provider == "ollama":
+        txt = ((data.get("message") or {}).get("content") or "").strip()
+        return txt or None
+
+    # OpenAI-compatible
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    txt = ((choices[0].get("message") or {}).get("content") or "").strip()
+    return txt or None

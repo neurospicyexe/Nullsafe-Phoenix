@@ -141,6 +141,7 @@ async def lifespan(app):
             _cooldown,
             halseth_clients=halseth_clients,
             identity_loader=identity_loader,
+            orient_cache=orient_cache,
         )
         logger.info("[brain] SWARM_MODE=true: SwarmEvaluator initialized")
     else:

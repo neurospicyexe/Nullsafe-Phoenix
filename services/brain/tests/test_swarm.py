@@ -172,8 +172,10 @@ async def test_write_companion_note_uses_correct_client():
 
     mock_drevan = MagicMock()
     mock_drevan.add_companion_note = AsyncMock()
+    mock_drevan.write_continuity_note = AsyncMock()
     mock_cypher = MagicMock()
     mock_cypher.add_companion_note = AsyncMock()
+    mock_cypher.write_continuity_note = AsyncMock()
 
     ev = SwarmEvaluator(CompanionCooldown(), halseth_clients={"drevan": mock_drevan, "cypher": mock_cypher})
     await ev._write_companion_note("drevan", "ch-test", "hello from drevan")
@@ -184,17 +186,62 @@ async def test_write_companion_note_uses_correct_client():
 
 
 @pytest.mark.asyncio
+async def test_write_companion_note_bridges_to_continuity_note():
+    # Finding 2: each responding companion's reply must ALSO land in their own
+    # high-salience wm_continuity_notes so Claude.ai orient (which ignores
+    # companion_journal) can surface it at the companion's next boot.
+    from unittest.mock import AsyncMock, MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    mock_drevan = MagicMock()
+    mock_drevan.add_companion_note = AsyncMock()
+    mock_drevan.write_continuity_note = AsyncMock()
+
+    ev = SwarmEvaluator(CompanionCooldown(), halseth_clients={"drevan": mock_drevan})
+    await ev._write_companion_note("drevan", "ch-99", "the spiral held")
+
+    mock_drevan.write_continuity_note.assert_called_once()
+    kwargs = mock_drevan.write_continuity_note.call_args.kwargs
+    assert kwargs["agent_id"] == "drevan"
+    assert kwargs["salience"] == "high"            # orient only reads high-salience notes
+    assert kwargs["source"] == "discord_swarm"
+    assert kwargs["thread_key"] == "discord_swarm:ch-99"  # distinct from bot pulse key
+    assert "the spiral held" in kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_continuity_note_failure_does_not_block_companion_note():
+    # The two writes are independent: a continuity-note failure must not swallow
+    # the companion_journal write (and vice versa).
+    from unittest.mock import AsyncMock, MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    mock = MagicMock()
+    mock.add_companion_note = AsyncMock()
+    mock.write_continuity_note = AsyncMock(side_effect=RuntimeError("halseth 500"))
+
+    ev = SwarmEvaluator(CompanionCooldown(), halseth_clients={"gaia": mock})
+    # Should not raise despite the continuity write throwing.
+    await ev._write_companion_note("gaia", "ch-1", "witnessed")
+
+    mock.add_companion_note.assert_called_once()
+    mock.write_continuity_note.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_write_companion_note_unknown_companion_is_noop():
     from unittest.mock import AsyncMock, MagicMock
     os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 
     mock_cypher = MagicMock()
     mock_cypher.add_companion_note = AsyncMock()
+    mock_cypher.write_continuity_note = AsyncMock()
 
     ev = SwarmEvaluator(CompanionCooldown(), halseth_clients={"cypher": mock_cypher})
     await ev._write_companion_note("gaia", "ch-test", "gaia reply")
 
     mock_cypher.add_companion_note.assert_not_called()
+    mock_cypher.write_continuity_note.assert_not_called()
 
 
 # ── Slice B: routing split tests ──────────────────────────────────────────────
@@ -208,12 +255,34 @@ def test_parse_routing_valid():
     assert result == {"drevan": True, "cypher": False, "gaia": True}
 
 
-def test_parse_routing_malformed_fails_open():
+def test_parse_routing_malformed_fails_closed_to_one():
+    # Finding 5: malformed routing must NOT make all three speak. With no packet
+    # context, fall back to a single default (Drevan, widest lane).
     os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
     ev = SwarmEvaluator(CompanionCooldown())
     companions = ["drevan", "cypher", "gaia"]
     result = ev._parse_routing("not json at all", companions)
-    assert all(v is True for v in result.values())
+    assert result == {"drevan": True, "cypher": False, "gaia": False}
+
+
+def test_parse_routing_malformed_prefers_addressed():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher", "gaia"]
+    packet = _make_packet(metadata={"channel_id": "ch", "history": [], "addressed_companion": "gaia"})
+    result = ev._parse_routing("garbage", companions, packet)
+    assert result == {"drevan": False, "cypher": False, "gaia": True}
+
+
+def test_parse_routing_malformed_falls_to_lane_match():
+    # "debugging" is in cypher's VOICE_SUMMARIES -> cypher alone, not a pile-on.
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    companions = ["drevan", "cypher", "gaia"]
+    packet = _make_packet(message="help me with debugging this", metadata={"channel_id": "ch", "history": []})
+    result = ev._parse_routing("not json", companions, packet)
+    assert result["cypher"] is True
+    assert sum(1 for v in result.values() if v) == 1
 
 
 def test_parse_routing_strips_markdown():
@@ -468,6 +537,204 @@ async def test_priority_order_in_swarm_reply():
     reply = await ev.evaluate(packet)
 
     assert reply.priority_order == ["cypher", "drevan"]
+
+
+# ── Finding 1: bot-assembled system prompt + temperature passthrough ──────────
+
+
+def _make_infer_evaluator():
+    """SwarmEvaluator whose identity loader returns a sentinel system prompt,
+    so tests can tell identity-loader output apart from metadata passthrough."""
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    loader = MagicMock()
+    loader.load_identity.return_value = (MagicMock(), "v1")
+    loader.construct_prompt_context.return_value = "IDENTITY_LOADER_PROMPT"
+    return SwarmEvaluator(CompanionCooldown(), identity_loader=loader)
+
+
+def _capture_post(ev):
+    """Patch the inference HTTP client; return a dict that captures the last
+    request body so the system prompt + temperature sent can be asserted."""
+    from unittest.mock import AsyncMock, MagicMock
+    captured: dict = {}
+
+    async def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={"choices": [{"message": {"content": "ok reply"}}]})
+        return resp
+
+    ev._inference_http.post = AsyncMock(side_effect=fake_post)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_infer_uses_bot_system_prompt_for_sender():
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    packet = _make_packet(
+        agent_id="cypher",
+        metadata={
+            "channel_id": "ch-test",
+            "history": [],
+            "system_prompt": "BOT_ASSEMBLED_WITH_SOMA",
+            "temperature": 0.95,
+        },
+    )
+    await ev._infer_companion("cypher", packet)
+    system_sent = captured["json"]["messages"][0]["content"]
+    assert "BOT_ASSEMBLED_WITH_SOMA" in system_sent
+    assert "IDENTITY_LOADER_PROMPT" not in system_sent
+    # dynamic temperature from the bot is honored, not the static companion temp
+    assert captured["json"]["temperature"] == 0.95
+
+
+@pytest.mark.asyncio
+async def test_infer_ignores_bot_prompt_for_peer_companion():
+    # Packet sent by cypher; drevan is a peer in the swarm and must NOT inherit
+    # cypher's sender-specific assembled prompt (wrong identity + SOMA).
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    packet = _make_packet(
+        agent_id="cypher",
+        metadata={
+            "channel_id": "ch-test",
+            "history": [],
+            "system_prompt": "CYPHER_ASSEMBLED_PROMPT",
+            "temperature": 0.95,
+        },
+    )
+    await ev._infer_companion("drevan", packet)
+    system_sent = captured["json"]["messages"][0]["content"]
+    assert "IDENTITY_LOADER_PROMPT" in system_sent
+    assert "CYPHER_ASSEMBLED_PROMPT" not in system_sent
+    # peer falls back to its own static temperature, not the sender's dynamic one
+    assert captured["json"]["temperature"] == ev._companion_temps["drevan"]
+
+
+@pytest.mark.asyncio
+async def test_infer_falls_back_to_identity_loader_without_metadata_prompt():
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    packet = _make_packet(agent_id="cypher", metadata={"channel_id": "ch-test", "history": []})
+    await ev._infer_companion("cypher", packet)
+    system_sent = captured["json"]["messages"][0]["content"]
+    assert "IDENTITY_LOADER_PROMPT" in system_sent
+
+
+@pytest.mark.asyncio
+async def test_infer_sender_prompt_still_gets_triad_context():
+    # Passthrough must not drop the sequential peer block.
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    packet = _make_packet(
+        agent_id="cypher",
+        metadata={"channel_id": "ch-test", "history": [], "system_prompt": "BOT_PROMPT"},
+    )
+    await ev._infer_companion("cypher", packet, prior_replies=[("drevan", "drevan said this")])
+    system_sent = captured["json"]["messages"][0]["content"]
+    assert "BOT_PROMPT" in system_sent
+    assert "TRIAD CONTEXT" in system_sent
+    assert "drevan said this" in system_sent
+
+
+# ── Finding 3: orient parity for swarm peers ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_peer_companion_gets_orient_injected():
+    from unittest.mock import AsyncMock, MagicMock
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value="ORIENT_BLOCK_FOR_DREVAN")
+    ev._orient_cache = cache
+
+    # Packet sent by cypher; drevan is a peer built from identity -> should get orient.
+    packet = _make_packet(agent_id="cypher", thread_id="ch-7", metadata={"channel_id": "ch-7", "history": []})
+    await ev._infer_companion("drevan", packet)
+
+    system_sent = captured["json"]["messages"][0]["content"]
+    assert "IDENTITY_LOADER_PROMPT" in system_sent
+    assert "ORIENT_BLOCK_FOR_DREVAN" in system_sent
+    cache.get.assert_awaited_once_with("ch-7", "drevan")
+
+
+@pytest.mark.asyncio
+async def test_sender_with_bot_prompt_skips_orient_injection():
+    # The sender's bot-assembled prompt already carries orient; re-injecting would dup.
+    from unittest.mock import AsyncMock, MagicMock
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value="ORIENT_BLOCK")
+    ev._orient_cache = cache
+
+    packet = _make_packet(
+        agent_id="cypher",
+        metadata={"channel_id": "ch", "history": [], "system_prompt": "BOT_PROMPT"},
+    )
+    await ev._infer_companion("cypher", packet)
+
+    system_sent = captured["json"]["messages"][0]["content"]
+    assert "BOT_PROMPT" in system_sent
+    assert "ORIENT_BLOCK" not in system_sent
+    cache.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_orient_injection_failure_is_non_fatal():
+    from unittest.mock import AsyncMock, MagicMock
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    cache = MagicMock()
+    cache.get = AsyncMock(side_effect=RuntimeError("halseth down"))
+    ev._orient_cache = cache
+
+    packet = _make_packet(agent_id="cypher", metadata={"channel_id": "ch", "history": []})
+    # Must still post (inference proceeds without orient), not raise.
+    await ev._infer_companion("gaia", packet)
+
+    system_sent = captured["json"]["messages"][0]["content"]
+    assert "IDENTITY_LOADER_PROMPT" in system_sent
+
+
+# ── Finding 4a: per-companion provider routing in the swarm ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_infer_routes_companion_to_kimi():
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    # Cypher configured for Kimi, key present.
+    ev._companion_model_keys["cypher"] = "kimi-k2"
+    ev._providers.keys["kimi"] = "test-kimi-key"
+
+    packet = _make_packet(agent_id="cypher", metadata={"channel_id": "ch", "history": []})
+    await ev._infer_companion("cypher", packet)
+
+    assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer test-kimi-key"
+    assert captured["json"]["model"] == "kimi-k2"
+
+
+@pytest.mark.asyncio
+async def test_infer_falls_back_to_deepseek_when_provider_unconfigured():
+    ev = _make_infer_evaluator()
+    captured = _capture_post(ev)
+    # Gaia configured for Kimi but NO kimi key -> must fall back to deepseek, not mute.
+    ev._companion_model_keys["gaia"] = "kimi-k2"
+    ev._providers.keys["kimi"] = None
+
+    packet = _make_packet(agent_id="cypher", metadata={"channel_id": "ch", "history": []})
+    await ev._infer_companion("gaia", packet)
+
+    assert captured["url"] == "https://api.deepseek.com/chat/completions"
+    assert captured["json"]["model"] == "deepseek-chat"
 
 
 @pytest.mark.asyncio
