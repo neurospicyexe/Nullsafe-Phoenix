@@ -63,7 +63,12 @@ class Config:
     GAIA_TOP_P:   float = float(os.getenv("GAIA_TOP_P",   "0.85"))
 
     # Swarm depth caps (hardcoded literals lifted from agents/evaluator.py).
-    MAX_SWARM_DEPTH:       int = int(os.getenv("MAX_SWARM_DEPTH",       "3"))
+    # MAX_SWARM_DEPTH raised 3->6 (2026-06-04) so a real triad thread can breathe: at depth>=3 the
+    # old default all-nulled, capping a companion-to-companion exchange at ~3 turns total. The bot's
+    # chainDepth is now gap-scoped (a fresh seed after a quiet gap starts at depth 1), and
+    # DEPTH_BIAS_THRESHOLD makes companions self-select for silence as depth grows -- so 6 lets a
+    # thread run while still tapering. Env-overridable: lower it in one restart if they pile on.
+    MAX_SWARM_DEPTH:       int = int(os.getenv("MAX_SWARM_DEPTH",       "6"))
     DEPTH_BIAS_THRESHOLD:  int = int(os.getenv("DEPTH_BIAS_THRESHOLD",  "2"))
 
     @staticmethod

@@ -106,7 +106,7 @@ def test_cooldown_marks_posted_on_reply():
 
 import uuid
 import datetime
-from services.brain.agents.evaluator import SwarmEvaluator
+from services.brain.agents.evaluator import SwarmEvaluator, MAX_DEPTH
 from shared.contracts import ThoughtPacket
 
 
@@ -130,7 +130,7 @@ async def test_evaluator_depth_cap_returns_all_null():
     os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
     cd = CompanionCooldown()
     ev = SwarmEvaluator(cd)
-    packet = _make_packet(depth=3)
+    packet = _make_packet(depth=MAX_DEPTH)  # at/over the cap -> all-null (cap-relative, won't rot)
     reply = await ev.evaluate(packet)
     assert all(v is None for v in reply.responses.values())
     assert reply.status == "ok"
