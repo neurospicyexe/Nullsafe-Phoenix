@@ -21,6 +21,7 @@ load_dotenv(".env.brain", override=True)
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from shared.contracts import AgentReply, SwarmReply, ThoughtPacket
 from services.brain.brain_config import Config
@@ -203,6 +204,31 @@ async def health_check():
         "version": "v2-day-one",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
+
+class ModelCacheInvalidateRequest(BaseModel):
+    companion_id: str
+
+
+@app.post("/admin/model-cache/invalidate")
+async def invalidate_model_cache(req: ModelCacheInvalidateRequest):
+    """Drop a companion's cached active_model so a Discord /model switch is live now
+    rather than after the 60s TTL. Best-effort: no-op (cleared=false) when swarm is off."""
+    if _swarm_evaluator is None:
+        return {"cleared": False, "reason": "swarm_disabled", "companion_id": req.companion_id}
+    cleared = _swarm_evaluator.invalidate_model_cache(req.companion_id)
+    logger.info(f"[model-cache] invalidate {req.companion_id}: cleared={cleared}")
+    return {"cleared": cleared, "companion_id": req.companion_id}
+
+
+@app.get("/admin/model-status/{companion_id}")
+async def model_status(companion_id: str):
+    """Report the model a companion will actually use right now (for /status)."""
+    if _swarm_evaluator is None:
+        return {"companion_id": companion_id, "active_model": None, "cached": False, "swarm": False}
+    status = await _swarm_evaluator.model_status(companion_id)
+    status["swarm"] = True
+    return status
 
 
 @app.post("/chat")

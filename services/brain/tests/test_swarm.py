@@ -810,3 +810,30 @@ async def test_priority_order_empty_when_no_active():
     reply = await ev.evaluate(packet)
 
     assert reply.priority_order == []
+
+
+# ── /model force-clear + /status support (Discord slash commands) ─────────────
+
+def test_invalidate_model_cache_clears_entry():
+    import time as _t
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    # Seed a live cache entry as if a prior eval had read Halseth.
+    ev._model_cache["cypher"] = (_t.monotonic() + 999, "kimi-k2")
+
+    assert ev.invalidate_model_cache("cypher") is True   # cleared
+    assert "cypher" not in ev._model_cache
+    assert ev.invalidate_model_cache("cypher") is False  # nothing left to clear
+
+
+@pytest.mark.asyncio
+async def test_model_status_reports_effective_and_cache_flag():
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown())
+    # No halseth client -> override read is a no-op miss; effective key is the default.
+    status = await ev.model_status("cypher")
+    assert status["companion_id"] == "cypher"
+    assert isinstance(status["active_model"], str) and status["active_model"]
+    # No halseth client -> no override read, no cache entry written.
+    assert status["cached"] is False
+    assert status["ttl_remaining_s"] == 0.0

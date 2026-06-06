@@ -337,6 +337,26 @@ class SwarmEvaluator:
             return override
         return self._companion_model_keys.get(companion_id, self._default_model_key)
 
+    def invalidate_model_cache(self, companion_id: str) -> bool:
+        """Drop a companion's cached active_model so the next eval re-reads Halseth.
+        Called by the /model slash command so a Discord model switch is live now
+        instead of waiting out the TTL. Returns True if an entry was actually cleared."""
+        return self._model_cache.pop(companion_id, None) is not None
+
+    async def model_status(self, companion_id: str) -> Dict[str, object]:
+        """Report what model this companion will actually use right now, for /status.
+        `active_model` is the effective key (override-or-default) after any cache read."""
+        cached = self._model_cache.get(companion_id)
+        ttl_remaining = (
+            max(0.0, round(cached[0] - time.monotonic(), 1)) if cached else 0.0
+        )
+        return {
+            "companion_id": companion_id,
+            "active_model": await self._effective_model_key(companion_id),
+            "cached": cached is not None,
+            "ttl_remaining_s": ttl_remaining,
+        }
+
     def _resolve(self, model_key: str, *, label: str = "") -> tuple[str, str]:
         """Resolve a model key to (provider, model), falling back to DeepSeek when the
         configured provider has no credential -- a misconfigured KIMI_API_KEY must not
