@@ -23,6 +23,8 @@ MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
     "llama-3.3-70b":     ("groq",      "llama-3.3-70b-versatile"),
     "gemma-4":           ("lmstudio",  "gemma-4"),
     "mistral-large-3":   ("lmstudio",  "mistral-large-3"),
+    "mistral-large":     ("mistral",   "mistral-large-latest"),
+    "mistral-small":     ("mistral",   "mistral-small-latest"),
     "kimi-k2":           ("kimi",      "kimi-k2"),
     "kimi-128k":         ("kimi",      "moonshot-v1-128k"),
     "gpt-4o":            ("openai",    "gpt-4o"),
@@ -33,13 +35,14 @@ MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
 }
 
 # Providers that speak the OpenAI /chat/completions wire format.
-_OPENAI_COMPATIBLE = {"deepseek", "kimi", "groq", "openai", "lmstudio"}
+_OPENAI_COMPATIBLE = {"deepseek", "kimi", "groq", "openai", "lmstudio", "mistral"}
 
 _OPENAI_BASE_URLS = {
     "deepseek": "https://api.deepseek.com/chat/completions",
     "kimi":     "https://api.moonshot.cn/v1/chat/completions",
     "groq":     "https://api.groq.com/openai/v1/chat/completions",
     "openai":   "https://api.openai.com/v1/chat/completions",
+    "mistral":  "https://api.mistral.ai/v1/chat/completions",
 }
 
 
@@ -66,6 +69,7 @@ class ProviderConfig:
             "groq":      e.get("GROQ_API_KEY"),
             "openai":    e.get("OPENAI_API_KEY"),
             "anthropic": e.get("ANTHROPIC_API_KEY"),
+            "mistral":   e.get("MISTRAL_API_KEY"),
         }
         self.urls: Dict[str, Optional[str]] = {
             "lmstudio": (e.get("LMSTUDIO_URL") or "").rstrip("/") or None,

@@ -83,6 +83,22 @@ def test_build_groq_and_openai_urls():
     assert o_url == "https://api.openai.com/v1/chat/completions"
 
 
+def test_resolve_and_build_mistral_api():
+    # Mistral is an OpenAI-compatible API provider (not the local lmstudio entry).
+    assert resolve_model("mistral-large") == ("mistral", "mistral-large-latest")
+    assert resolve_model("mistral-small") == ("mistral", "mistral-small-latest")
+    cfg = _cfg(MISTRAL_API_KEY="mk")
+    assert cfg.available("mistral") is True
+    url, headers, body = build_request(
+        "mistral", "mistral-large-latest", "SYS", [{"role": "user", "content": "hi"}],
+        temperature=0.7, max_tokens=10, cfg=cfg,
+    )
+    assert url == "https://api.mistral.ai/v1/chat/completions"
+    assert headers["Authorization"] == "Bearer mk"
+    assert body["model"] == "mistral-large-latest"
+    assert body["messages"][0] == {"role": "system", "content": "SYS"}
+
+
 def test_build_lmstudio_no_auth():
     cfg = _cfg(LMSTUDIO_URL="http://box:1234/")
     url, headers, _ = build_request(
