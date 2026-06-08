@@ -138,9 +138,43 @@ def test_build_anthropic_separates_system_and_clamps_temp():
     assert url == "https://api.anthropic.com/v1/messages"
     assert headers["x-api-key"] == "ak"
     assert headers["anthropic-version"] == "2023-06-01"
-    assert body["system"] == "SYS"
+    assert headers["anthropic-beta"] == "prompt-caching-2024-07-31"
+    # system is now a single cached block (no stable_system split)
+    assert body["system"] == [{"type": "text", "text": "SYS", "cache_control": {"type": "ephemeral"}}]
     assert body["messages"] == [{"role": "user", "content": "hi"}]  # system NOT in messages
     assert body["temperature"] == 1.0  # clamped from 1.3
+
+
+def test_build_anthropic_two_block_caching():
+    cfg = _cfg(ANTHROPIC_API_KEY="ak")
+    _, _, body = build_request(
+        "anthropic", "claude-sonnet-4-6", "DYNAMIC_ORIENT", [{"role": "user", "content": "hi"}],
+        temperature=1.0, max_tokens=800, stable_system="STABLE_IDENTITY", cfg=cfg,
+    )
+    assert body["system"] == [
+        {"type": "text", "text": "STABLE_IDENTITY", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "DYNAMIC_ORIENT"},
+    ]
+
+
+def test_build_anthropic_stable_only_cached():
+    cfg = _cfg(ANTHROPIC_API_KEY="ak")
+    _, _, body = build_request(
+        "anthropic", "claude-sonnet-4-6", "", [{"role": "user", "content": "hi"}],
+        temperature=1.0, max_tokens=800, stable_system="STABLE_IDENTITY", cfg=cfg,
+    )
+    assert body["system"] == [
+        {"type": "text", "text": "STABLE_IDENTITY", "cache_control": {"type": "ephemeral"}},
+    ]
+
+
+def test_build_anthropic_no_system_omits_key():
+    cfg = _cfg(ANTHROPIC_API_KEY="ak")
+    _, _, body = build_request(
+        "anthropic", "claude-sonnet-4-6", "", [{"role": "user", "content": "hi"}],
+        temperature=1.0, max_tokens=800, cfg=cfg,
+    )
+    assert "system" not in body
 
 
 # ── build_request: Ollama ─────────────────────────────────────────────────────

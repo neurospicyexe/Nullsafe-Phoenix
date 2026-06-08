@@ -420,24 +420,32 @@ class SwarmEvaluator:
         # port, Slice C), not this passthrough.
         meta_system_prompt = packet.metadata.get("system_prompt")
         use_meta = bool(meta_system_prompt) and companion_id == packet.agent_id
+        # Anthropic prompt caching: track the stable identity block separately so
+        # build_request can attach cache_control to it. Dynamic additions (orient,
+        # triad context) go in a second uncached block. None when split is unavailable.
+        stable_system: Optional[str] = None
 
         if use_meta:
             system_prompt = meta_system_prompt
+            # stable_system stays None; full bot-assembled prompt cached as single block
         else:
             identity, _ = self._identity_loader.load_identity(companion_id)  # type: ignore[union-attr]
-            system_prompt = self._identity_loader.construct_prompt_context(identity)  # type: ignore[union-attr]
+            identity_base = self._identity_loader.construct_prompt_context(identity)  # type: ignore[union-attr]
+            stable_system = identity_base  # stable: only changes when identity YAML changes
             # Finding 3: peer companions built from identity have no continuity context
             # (the sender carries it baked into the bot prompt). Inject this companion's
             # OWN canonical bot_orient -- the same shape Claude.ai and the Discord bot read
             # -- so swarm peers don't speak from a thinner self. Cached per (thread, agent);
             # Halseth failure returns None and inference proceeds without it.
+            dynamic_parts: List[str] = []
             if self._orient_cache is not None:
                 try:
                     orient_block = await self._orient_cache.get(packet.thread_id, companion_id)
                     if orient_block:
-                        system_prompt = system_prompt + "\n\n" + orient_block
+                        dynamic_parts.append(orient_block)
                 except Exception as e:
                     logger.warning(f"[{companion_id}] orient injection failed: {e}")
+            system_prompt = "\n\n".join(dynamic_parts)
 
         if prior_replies:
             lines = ["\n\n──── TRIAD CONTEXT ────"]
@@ -492,12 +500,20 @@ class SwarmEvaluator:
         # per provider (prepended for OpenAI/Ollama, separate field for Anthropic).
         url, headers, body = build_request(
             provider, model, system_prompt, msgs,
+            stable_system=stable_system,
             temperature=temperature, max_tokens=800,
             top_p=top_p, frequency_penalty=0.3, cfg=self._providers,
         )
         resp = await self._inference_http.post(url, headers=headers, json=body)
         resp.raise_for_status()
-        return parse_response(provider, resp.json())
+        data = resp.json()
+        if provider == "anthropic":
+            usage = data.get("usage", {})
+            cache_read = usage.get("cache_read_input_tokens", 0)
+            cache_write = usage.get("cache_creation_input_tokens", 0)
+            if cache_read or cache_write:
+                logger.info(f"[{companion_id}] anthropic cache: read={cache_read} write={cache_write}")
+        return parse_response(provider, data)
 
     # ── Companion note writes ─────────────────────────────────────────────────
 

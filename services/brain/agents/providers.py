@@ -95,6 +95,7 @@ def build_request(
     max_tokens: int,
     top_p: Optional[float] = None,
     frequency_penalty: Optional[float] = None,
+    stable_system: Optional[str] = None,
     cfg: ProviderConfig,
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Construct (url, headers, json_body) for a provider.
@@ -140,8 +141,9 @@ def build_request(
             "Content-Type": "application/json",
             "x-api-key": key,
             "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
         }
-        body = {
+        body: Dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
@@ -149,8 +151,23 @@ def build_request(
             # would 400. Clamp so a high-temp companion (Drevan) doesn't break here.
             "temperature": min(temperature, 1.0),
         }
-        if system_prompt:
-            body["system"] = system_prompt
+        # Prompt caching: stable identity block (rarely changes) gets cache_control;
+        # dynamic additions (orient, triad context) go in a second uncached block.
+        # When stable_system is not split out (use_meta=True sender path), cache the
+        # full prompt as a single block -- hits within a session where orient is stable.
+        if stable_system and system_prompt:
+            body["system"] = [
+                {"type": "text", "text": stable_system, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": system_prompt},
+            ]
+        elif stable_system:
+            body["system"] = [
+                {"type": "text", "text": stable_system, "cache_control": {"type": "ephemeral"}},
+            ]
+        elif system_prompt:
+            body["system"] = [
+                {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
+            ]
         if top_p is not None:
             body["top_p"] = top_p
         return url, headers, body
