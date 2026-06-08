@@ -501,18 +501,27 @@ class SwarmEvaluator:
         url, headers, body = build_request(
             provider, model, system_prompt, msgs,
             stable_system=stable_system,
+            cache_key=companion_id,
             temperature=temperature, max_tokens=800,
             top_p=top_p, frequency_penalty=0.3, cfg=self._providers,
         )
         resp = await self._inference_http.post(url, headers=headers, json=body)
         resp.raise_for_status()
         data = resp.json()
+        usage = data.get("usage", {})
         if provider == "anthropic":
-            usage = data.get("usage", {})
             cache_read = usage.get("cache_read_input_tokens", 0)
             cache_write = usage.get("cache_creation_input_tokens", 0)
             if cache_read or cache_write:
                 logger.info(f"[{companion_id}] anthropic cache: read={cache_read} write={cache_write}")
+        elif provider == "kimi":
+            cached = usage.get("cached_tokens", 0)
+            if cached:
+                logger.info(f"[{companion_id}] kimi cache hit: {cached} tokens")
+        elif provider == "mistral":
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            if cached:
+                logger.info(f"[{companion_id}] mistral cache hit: {cached} tokens")
         return parse_response(provider, data)
 
     # ── Companion note writes ─────────────────────────────────────────────────

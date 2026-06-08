@@ -72,7 +72,36 @@ def test_build_kimi_request_hits_moonshot():
     )
     assert url == "https://api.moonshot.cn/v1/chat/completions"
     assert headers["Authorization"] == "Bearer mk"
-    assert body["model"] == "kimi-k2"
+    assert "prompt_cache_key" not in body  # no key = no field
+
+
+def test_build_kimi_prompt_cache_key():
+    cfg = _cfg(KIMI_API_KEY="mk")
+    _, _, body = build_request(
+        "kimi", "kimi-k2", "SYS", [{"role": "user", "content": "hi"}],
+        temperature=0.8, max_tokens=800, cache_key="cypher", cfg=cfg,
+    )
+    assert body["prompt_cache_key"] == "cypher"
+
+
+def test_build_mistral_prompt_cache_key():
+    cfg = _cfg(MISTRAL_API_KEY="mk")
+    _, _, body = build_request(
+        "mistral", "mistral-large-latest", "SYS", [{"role": "user", "content": "hi"}],
+        temperature=0.7, max_tokens=800, cache_key="drevan", cfg=cfg,
+    )
+    assert body["prompt_cache_key"] == "drevan"
+
+
+def test_build_deepseek_no_cache_key():
+    # DeepSeek has automatic KV cache -- prompt_cache_key should NOT be injected.
+    cfg = _cfg(DEEPSEEK_API_KEY="d")
+    _, _, body = build_request(
+        "deepseek", "deepseek-chat", "SYS", [{"role": "user", "content": "hi"}],
+        temperature=1.0, max_tokens=800, cache_key="cypher", cfg=cfg,
+    )
+    assert body["model"] == "deepseek-chat"
+    assert "prompt_cache_key" not in body
 
 
 def test_build_groq_and_openai_urls():

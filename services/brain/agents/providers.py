@@ -96,6 +96,7 @@ def build_request(
     top_p: Optional[float] = None,
     frequency_penalty: Optional[float] = None,
     stable_system: Optional[str] = None,
+    cache_key: Optional[str] = None,
     cfg: ProviderConfig,
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Construct (url, headers, json_body) for a provider.
@@ -130,6 +131,11 @@ def build_request(
             body["top_p"] = top_p
         if frequency_penalty is not None:
             body["frequency_penalty"] = frequency_penalty
+        # Kimi and Mistral both support prompt_cache_key for prefix caching.
+        # Pass the companion id so the stable system prompt prefix is reused
+        # across consecutive messages from the same companion.
+        if cache_key and provider in ("kimi", "mistral"):
+            body["prompt_cache_key"] = cache_key
         return url, headers, body
 
     if provider == "anthropic":
