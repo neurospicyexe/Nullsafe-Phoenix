@@ -19,7 +19,7 @@ def _cfg(**env):
 # ── resolve_model ─────────────────────────────────────────────────────────────
 
 def test_resolve_known_keys():
-    assert resolve_model("kimi-k2") == ("kimi", "kimi-k2")
+    assert resolve_model("kimi-k2") == ("kimi", "kimi-k2.6")
     assert resolve_model("kimi-128k") == ("kimi", "moonshot-v1-128k")
     assert resolve_model("claude-sonnet") == ("anthropic", "claude-sonnet-4-6")
     assert resolve_model("llama-3.3-70b") == ("groq", "llama-3.3-70b-versatile")
@@ -68,7 +68,7 @@ def test_build_deepseek_request():
 def test_build_kimi_request_hits_moonshot():
     cfg = _cfg(KIMI_API_KEY="mk")
     url, headers, body = build_request(
-        "kimi", "kimi-k2", "SYS", [{"role": "user", "content": "hi"}],
+        "kimi", "kimi-k2.6", "SYS", [{"role": "user", "content": "hi"}],
         temperature=0.8, max_tokens=800, cfg=cfg,
     )
     assert url == "https://api.moonshot.cn/v1/chat/completions"
@@ -79,7 +79,7 @@ def test_build_kimi_request_hits_moonshot():
 def test_build_kimi_prompt_cache_key():
     cfg = _cfg(KIMI_API_KEY="mk")
     _, _, body = build_request(
-        "kimi", "kimi-k2", "SYS", [{"role": "user", "content": "hi"}],
+        "kimi", "kimi-k2.6", "SYS", [{"role": "user", "content": "hi"}],
         temperature=0.8, max_tokens=800, cache_key="cypher", cfg=cfg,
     )
     assert body["prompt_cache_key"] == "cypher"
@@ -154,7 +154,7 @@ def test_build_omits_system_when_empty():
 def test_build_missing_key_raises():
     cfg = _cfg(DEEPSEEK_API_KEY="d")  # no KIMI key
     with pytest.raises(ValueError):
-        build_request("kimi", "kimi-k2", "S", [], temperature=1.0, max_tokens=10, cfg=cfg)
+        build_request("kimi", "kimi-k2.6", "S", [], temperature=1.0, max_tokens=10, cfg=cfg)
 
 
 # ── build_request: Anthropic ──────────────────────────────────────────────────
