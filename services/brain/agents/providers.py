@@ -26,6 +26,7 @@ MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
     "mistral-large":     ("mistral",   "mistral-large-latest"),
     "mistral-small":     ("mistral",   "mistral-small-latest"),
     "kimi-k2":           ("kimi",      "kimi-k2.6"),           # versioned ID required by Moonshot API; env var = KIMI_API_KEY
+    "kimi-k2.5":         ("kimi",      "kimi-k2.5"),
     "kimi-128k":         ("kimi",      "moonshot-v1-128k"),
     "gpt-5.5":           ("openai",    "gpt-5.5"),
     "gpt-5.4":           ("openai",    "gpt-5.4"),
