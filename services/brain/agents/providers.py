@@ -25,7 +25,7 @@ MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
     "mistral-large-3":   ("lmstudio",  "mistral-large-3"),
     "mistral-large":     ("mistral",   "mistral-large-latest"),
     "mistral-small":     ("mistral",   "mistral-small-latest"),
-    "kimi-k2":           ("kimi",      "kimi-k2.6"),          # was "kimi-k2" (wrong); env var = KIMI_API_KEY
+    "kimi-k2":           ("kimi",      "kimi-k2"),             # env var = KIMI_API_KEY
     "kimi-128k":         ("kimi",      "moonshot-v1-128k"),
     "gpt-5.5":           ("openai",    "gpt-5.5"),
     "gpt-5.4":           ("openai",    "gpt-5.4"),
@@ -89,6 +89,30 @@ class ProviderConfig:
         return False
 
 
+def _normalize_messages(
+    messages: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """Merge consecutive same-role turns and strip a leading assistant turn.
+
+    Anthropic requires strict user→assistant alternation and rejects requests
+    that start with an assistant turn. Multi-participant Discord history creates
+    user→user sequences (two humans, or a human + another companion's turn)
+    that violate this, causing 400 Bad Request.
+    """
+    merged: List[Dict[str, str]] = []
+    for m in messages:
+        if merged and merged[-1]["role"] == m["role"]:
+            merged[-1] = {
+                "role": m["role"],
+                "content": merged[-1]["content"] + "\n\n" + m["content"],
+            }
+        else:
+            merged.append({"role": m["role"], "content": m["content"]})
+    if merged and merged[0]["role"] == "assistant":
+        merged = merged[1:]
+    return merged
+
+
 def build_request(
     provider: str,
     model: str,
@@ -124,7 +148,11 @@ def build_request(
                 raise ValueError(f"missing API key for provider '{provider}'")
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
 
-        msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages
+        # Combine stable identity block with dynamic context (orient, triad) into a
+        # single system message. Anthropic splits these for prompt caching; OpenAI-
+        # compatible providers don't have a separate system field so we concatenate.
+        effective_system = "\n\n".join(filter(None, [stable_system, system_prompt]))
+        msgs = ([{"role": "system", "content": effective_system}] if effective_system else []) + messages
         body: Dict[str, Any] = {
             "model": model,
             "messages": msgs,
@@ -153,6 +181,7 @@ def build_request(
             "anthropic-version": "2023-06-01",
             "anthropic-beta": "prompt-caching-2024-07-31",
         }
+        messages = _normalize_messages(messages)
         body: Dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -188,7 +217,8 @@ def build_request(
             raise ValueError("missing OLLAMA_URL for provider 'ollama'")
         url = f"{base}/api/chat"
         headers = {"Content-Type": "application/json"}
-        msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages
+        effective_system = "\n\n".join(filter(None, [stable_system, system_prompt]))
+        msgs = ([{"role": "system", "content": effective_system}] if effective_system else []) + messages
         options: Dict[str, Any] = {"temperature": temperature}
         if top_p is not None:
             options["top_p"] = top_p

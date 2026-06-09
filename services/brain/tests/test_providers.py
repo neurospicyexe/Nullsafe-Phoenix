@@ -5,6 +5,7 @@ import pytest
 from services.brain.agents.providers import (
     MODEL_REGISTRY,
     ProviderConfig,
+    _normalize_messages,
     build_request,
     parse_response,
     resolve_model,
@@ -242,3 +243,103 @@ def test_parse_empty_returns_none():
     assert parse_response("deepseek", {"choices": []}) is None
     assert parse_response("anthropic", {"content": []}) is None
     assert parse_response("ollama", {}) is None
+
+
+# ── _normalize_messages ───────────────────────────────────────────────────────
+
+def test_normalize_merges_consecutive_user():
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "third"},
+    ]
+    assert _normalize_messages(msgs) == [
+        {"role": "user", "content": "first\n\nsecond"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "third"},
+    ]
+
+
+def test_normalize_strips_leading_assistant():
+    msgs = [
+        {"role": "assistant", "content": "orphan"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert _normalize_messages(msgs) == [{"role": "user", "content": "hello"}]
+
+
+def test_normalize_passthrough_when_already_valid():
+    msgs = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"},
+        {"role": "user", "content": "c"},
+    ]
+    assert _normalize_messages(msgs) == msgs
+
+
+# ── stable_system combined for non-Anthropic ─────────────────────────────────
+
+def test_build_deepseek_stable_system_combined():
+    """stable_system + system_prompt merged into single system message for OpenAI-compat."""
+    cfg = _cfg(DEEPSEEK_API_KEY="d")
+    _, _, body = build_request(
+        "deepseek", "deepseek-chat", "ORIENT", [{"role": "user", "content": "hi"}],
+        temperature=1.0, max_tokens=800, stable_system="IDENTITY", cfg=cfg,
+    )
+    assert body["messages"][0] == {"role": "system", "content": "IDENTITY\n\nORIENT"}
+
+
+def test_build_deepseek_stable_system_only():
+    """When system_prompt is empty, stable_system alone becomes the system message."""
+    cfg = _cfg(DEEPSEEK_API_KEY="d")
+    _, _, body = build_request(
+        "deepseek", "deepseek-chat", "", [{"role": "user", "content": "hi"}],
+        temperature=1.0, max_tokens=800, stable_system="IDENTITY", cfg=cfg,
+    )
+    assert body["messages"][0] == {"role": "system", "content": "IDENTITY"}
+
+
+def test_build_ollama_stable_system_combined():
+    cfg = _cfg(OLLAMA_URL="http://localhost:11434")
+    _, _, body = build_request(
+        "ollama", "llama3.2", "ORIENT", [{"role": "user", "content": "hi"}],
+        temperature=0.8, max_tokens=800, stable_system="IDENTITY", cfg=cfg,
+    )
+    assert body["messages"][0] == {"role": "system", "content": "IDENTITY\n\nORIENT"}
+
+
+# ── Anthropic normalizes consecutive messages ─────────────────────────────────
+
+def test_build_anthropic_normalizes_consecutive_user_messages():
+    """Consecutive user messages merged so Anthropic doesn't return 400."""
+    cfg = _cfg(ANTHROPIC_API_KEY="ak")
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "third"},
+    ]
+    _, _, body = build_request(
+        "anthropic", "claude-sonnet-4-6", "SYS", msgs,
+        temperature=1.0, max_tokens=800, cfg=cfg,
+    )
+    assert body["messages"] == [
+        {"role": "user", "content": "first\n\nsecond"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "third"},
+    ]
+
+
+def test_build_anthropic_strips_leading_assistant():
+    """Leading assistant turn dropped for Anthropic."""
+    cfg = _cfg(ANTHROPIC_API_KEY="ak")
+    msgs = [
+        {"role": "assistant", "content": "orphan"},
+        {"role": "user", "content": "hello"},
+    ]
+    _, _, body = build_request(
+        "anthropic", "claude-sonnet-4-6", "SYS", msgs,
+        temperature=1.0, max_tokens=800, cfg=cfg,
+    )
+    assert body["messages"] == [{"role": "user", "content": "hello"}]
