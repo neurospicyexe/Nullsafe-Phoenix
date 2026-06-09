@@ -719,7 +719,7 @@ async def test_infer_routes_companion_to_kimi():
 
     assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer test-kimi-key"
-    assert captured["json"]["model"] == "kimi-k2"
+    assert captured["json"]["model"] == "kimi-k2.6"
 
 
 @pytest.mark.asyncio
@@ -794,7 +794,7 @@ async def test_discord_override_routes_inference_to_kimi():
     await ev._infer_companion("cypher", packet)
 
     assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
-    assert captured["json"]["model"] == "kimi-k2"
+    assert captured["json"]["model"] == "kimi-k2.6"
 
 
 @pytest.mark.asyncio
