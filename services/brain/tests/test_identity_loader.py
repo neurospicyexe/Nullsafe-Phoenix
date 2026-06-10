@@ -184,3 +184,98 @@ system_prompt_fragments:
         assert "StubAgent" in result
         assert "stub fragment" in result
         assert "stub anchor" in result
+
+
+# ── Unit: kernel overlay (Halseth-synced canonical identity) ─────────────────
+
+class TestKernelOverlay:
+    def _make_loader(self):
+        loader = IdentityLoader.__new__(IdentityLoader)
+        loader._cache = {}
+        loader._kernel_cache = {}
+        return loader
+
+    def _identity(self):
+        return AgentIdentity(name="Cypher", role="Blade companion", system_prompt="You are Cypher.")
+
+    def test_no_env_means_no_overlay(self, monkeypatch):
+        monkeypatch.delenv("HALSETH_URL", raising=False)
+        monkeypatch.delenv("HALSETH_ADMIN_SECRET", raising=False)
+        loader = self._make_loader()
+        identity, version = loader._apply_kernel_overlay("cypher", self._identity(), "abc123")
+        assert identity.system_prompt == "You are Cypher."
+        assert version == "abc123"
+
+    def test_overlay_appends_kernel_and_changes_version(self, monkeypatch):
+        monkeypatch.setenv("HALSETH_URL", "https://halseth.test")
+        monkeypatch.setenv("HALSETH_ADMIN_SECRET", "s3cret")
+        loader = self._make_loader()
+        bundle = "# SHARED DOCTRINE\nidentity is constant, substrate varies. " + ("x" * 250)
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"bundle": bundle}
+
+        import services.brain.identity.loader as loader_mod
+        monkeypatch.setattr(loader_mod.httpx, "get", lambda *a, **k: FakeResp())
+
+        identity, version = loader._apply_kernel_overlay("cypher", self._identity(), "abc123")
+        assert "IDENTITY KERNEL" in identity.system_prompt
+        assert "identity is constant" in identity.system_prompt
+        assert version.startswith("abc123+k")
+        # Cached copy stays pristine -- overlay returns a copy
+        assert self._identity().system_prompt == "You are Cypher."
+
+    def test_halseth_down_degrades_to_yaml_only(self, monkeypatch):
+        monkeypatch.setenv("HALSETH_URL", "https://halseth.test")
+        monkeypatch.setenv("HALSETH_ADMIN_SECRET", "s3cret")
+        loader = self._make_loader()
+
+        import services.brain.identity.loader as loader_mod
+        def boom(*a, **k):
+            raise RuntimeError("connection refused")
+        monkeypatch.setattr(loader_mod.httpx, "get", boom)
+
+        identity, version = loader._apply_kernel_overlay("cypher", self._identity(), "abc123")
+        assert identity.system_prompt == "You are Cypher."
+        assert version == "abc123"
+
+    def test_ttl_cache_serves_without_refetch(self, monkeypatch):
+        monkeypatch.setenv("HALSETH_URL", "https://halseth.test")
+        monkeypatch.setenv("HALSETH_ADMIN_SECRET", "s3cret")
+        loader = self._make_loader()
+        calls = {"n": 0}
+        bundle = "# KERNEL " + ("y" * 250)
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"bundle": bundle}
+
+        import services.brain.identity.loader as loader_mod
+        def counted_get(*a, **k):
+            calls["n"] += 1
+            return FakeResp()
+        monkeypatch.setattr(loader_mod.httpx, "get", counted_get)
+
+        loader._apply_kernel_overlay("cypher", self._identity(), "v1")
+        loader._apply_kernel_overlay("cypher", self._identity(), "v1")
+        assert calls["n"] == 1
+
+    def test_stale_cache_beats_nothing_when_halseth_drops(self, monkeypatch):
+        monkeypatch.setenv("HALSETH_URL", "https://halseth.test")
+        monkeypatch.setenv("HALSETH_ADMIN_SECRET", "s3cret")
+        loader = self._make_loader()
+        # Pre-seed an expired cache entry, then make the fetch fail
+        loader._kernel_cache["cypher"] = ("# OLD KERNEL " + ("z" * 250), -10_000.0)
+
+        import services.brain.identity.loader as loader_mod
+        def boom(*a, **k):
+            raise RuntimeError("connection refused")
+        monkeypatch.setattr(loader_mod.httpx, "get", boom)
+
+        identity, version = loader._apply_kernel_overlay("cypher", self._identity(), "v1")
+        assert "OLD KERNEL" in identity.system_prompt
