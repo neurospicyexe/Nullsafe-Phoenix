@@ -717,7 +717,7 @@ async def test_infer_routes_companion_to_kimi():
     packet = _make_packet(agent_id="cypher", metadata={"channel_id": "ch", "history": []})
     await ev._infer_companion("cypher", packet)
 
-    assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert captured["url"] == "https://api.moonshot.ai/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer test-kimi-key"
     assert captured["json"]["model"] == "kimi-k2.6"
 
@@ -793,7 +793,7 @@ async def test_discord_override_routes_inference_to_kimi():
     packet = _make_packet(agent_id="cypher", metadata={"channel_id": "ch", "history": []})
     await ev._infer_companion("cypher", packet)
 
-    assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert captured["url"] == "https://api.moonshot.ai/v1/chat/completions"
     assert captured["json"]["model"] == "kimi-k2.6"
 
 

@@ -71,7 +71,7 @@ def test_build_kimi_request_hits_moonshot():
         "kimi", "kimi-k2.6", "SYS", [{"role": "user", "content": "hi"}],
         temperature=0.8, max_tokens=800, cfg=cfg,
     )
-    assert url == "https://api.moonshot.cn/v1/chat/completions"
+    assert url == "https://api.moonshot.ai/v1/chat/completions"
     assert headers["Authorization"] == "Bearer mk"
     assert "prompt_cache_key" not in body  # no key = no field
 

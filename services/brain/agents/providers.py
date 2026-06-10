@@ -44,7 +44,8 @@ _OPENAI_COMPATIBLE = {"deepseek", "kimi", "groq", "openai", "lmstudio", "mistral
 
 _OPENAI_BASE_URLS = {
     "deepseek": "https://api.deepseek.com/chat/completions",
-    "kimi":     "https://api.moonshot.cn/v1/chat/completions",
+    # .ai is the international platform (platform.moonshot.ai keys); .cn keys 401 here and vice versa.
+    "kimi":     "https://api.moonshot.ai/v1/chat/completions",
     "groq":     "https://api.groq.com/openai/v1/chat/completions",
     "openai":   "https://api.openai.com/v1/chat/completions",
     "mistral":  "https://api.mistral.ai/v1/chat/completions",
