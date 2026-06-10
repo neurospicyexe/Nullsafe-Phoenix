@@ -215,7 +215,15 @@ class SwarmEvaluator:
     ) -> Dict[str, bool]:
         prompt = self._build_routing_prompt(packet, companions)
         raw = await self._call_routing(prompt)
-        return self._parse_routing(raw, companions, packet)
+        routing = self._parse_routing(raw, companions, packet)
+        # Voice fail-open (deferred fix from 2026-05-05, shipped 2026-06-09): a spoken
+        # message is someone talking out loud expecting to be heard -- all-silent is
+        # never a valid outcome. If routing suppressed everyone on a voice input,
+        # reuse the fallback picker (addressed > lane match > default) for one speaker.
+        if packet.metadata.get("voice_input") and not any(routing.values()):
+            logger.info("[swarm] voice_input all-silent routing overridden -> fallback speaker")
+            return self._fallback_routing(packet, companions)
+        return routing
 
     def _lane_score(self, message: str, companion: str) -> int:
         """Overlap between the message and a companion's VOICE_SUMMARIES lane keywords."""
@@ -278,6 +286,14 @@ class SwarmEvaluator:
                     f"All of: {named} -- must be true unless there is a critical reason not to respond."
                 )
 
+        voice_instruction = ""
+        if packet.metadata.get("voice_input"):
+            voice_instruction = (
+                "\n\nIMPORTANT: This message was SPOKEN (voice transcription). Someone "
+                "talking out loud expects to be heard -- at least one companion must "
+                "respond. Silence is not a valid outcome for voice."
+            )
+
         # Depth bias is suppressed when a companion is directly addressed --
         # a human naming a companion overrides chain-depth suppression.
         depth_instruction = ""
@@ -306,7 +322,8 @@ class SwarmEvaluator:
             f"Conversation:\n{history_text}\n\n"
             f"Author: {packet.author}\nMessage: {packet.message}"
             f"{depth_instruction}"
-            f"{address_instruction}\n\n"
+            f"{address_instruction}"
+            f"{voice_instruction}\n\n"
             "Return a JSON object with exactly these keys, values true or false only.\n"
             f"Keys: {', '.join(companions)}\n"
             f"Example: {example}"
