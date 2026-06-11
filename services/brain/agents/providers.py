@@ -21,8 +21,12 @@ MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
     "deepseek-chat":     ("deepseek",  "deepseek-chat"),
     "deepseek-reasoner": ("deepseek",  "deepseek-reasoner"),
     "llama-3.3-70b":     ("groq",      "llama-3.3-70b-versatile"),
-    "gemma-4":           ("lmstudio",  "gemma-4"),
-    "mistral-large-3":   ("lmstudio",  "mistral-large-3"),
+    # LM Studio model ids MUST match the workstation's /v1/models ids exactly (JIT-loaded).
+    # Reached via reverse SSH tunnel: LMSTUDIO_URL=http://127.0.0.1:11435 in .env.brain.
+    "gemma-local":       ("lmstudio",  "google/gemma-4-e4b"),
+    "nemo-local":        ("lmstudio",  "mistralai/mistral-nemo-instruct-2407"),
+    "qwen-local":        ("lmstudio",  "qwen/qwen3.5-9b"),
+    "lfm-local":         ("lmstudio",  "liquid/lfm2-1.2b"),
     "mistral-large":     ("mistral",   "mistral-large-latest"),
     "mistral-small":     ("mistral",   "mistral-small-latest"),
     "kimi-k2":           ("kimi",      "kimi-k2.6"),           # versioned ID required by Moonshot API; env var = KIMI_API_KEY
