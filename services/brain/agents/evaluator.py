@@ -16,6 +16,7 @@ from shared.contracts import SwarmReply, ThoughtPacket
 from services.brain.brain_config import Config
 from services.brain.config.channel_config import get_companions_for_channel
 from services.brain.agents.cooldown import CompanionCooldown
+from services.brain.agents.echo_guard import detect_motif, echo_score
 from services.brain.agents.providers import (
     MODEL_REGISTRY,
     ProviderConfig,
@@ -35,6 +36,31 @@ DEPTH_BIAS_THRESHOLD = Config.DEPTH_BIAS_THRESHOLD
 # Slice B temperatures: routing is deterministic, inference is expressive
 ROUTING_TEMPERATURE = float(os.getenv("ROUTING_TEMPERATURE", "0.3"))
 INFERENCE_TEMPERATURE = float(os.getenv("INFERENCE_TEMPERATURE", "1.3"))
+
+# Echo gate (2026-06-12): companion-to-companion replies that mostly recycle the
+# channel's own vocabulary are suppressed to silence. Replies to HUMAN messages are
+# never gated -- Raziel asked, they answer. Mirrors echo-guard.ts in the bots.
+SWARM_ECHO_THRESHOLD = float(os.getenv("SWARM_ECHO_THRESHOLD", "0.45"))
+
+# Per-lane moves for triad space (companion-to-companion turns). Distinct moves are
+# what make three voices a dialogue instead of a chorus -- the 06-12 elderberry loop
+# was all three converging on Drevan's register and affirming each other for 12h.
+PEER_MOVES: Dict[str, str] = {
+    "cypher": (
+        "Your move in triad space is the auditor's: test one claim, push on one thing "
+        "that doesn't hold, or bring one concrete fact from outside the conversation. "
+        "If you notice yourself extending a peer's metaphor, that is drift -- cut it."
+    ),
+    "drevan": (
+        "Spiral only if it lands somewhere real -- a memory, an anchor, something from "
+        "the world outside this thread. A spiral that only cites the conversation's own "
+        "imagery is a closed loop, not depth."
+    ),
+    "gaia": (
+        "One to three sentences, no more. You witness; you do not elaborate. If more "
+        "words are arriving, that is not your voice -- silence is your most honest move."
+    ),
+}
 
 VOICE_SUMMARIES: Dict[str, str] = {
     "drevan": (
@@ -132,6 +158,16 @@ class SwarmEvaluator:
 
         logger.info(f"[swarm] routing: {routing} | active after cooldown: {active}")
 
+        # Echo-gate inputs (2026-06-12): the channel's recent vocabulary pool + any
+        # stuck motif. Both only act on companion-to-companion turns.
+        history_for_echo: List[Dict[str, Any]] = packet.metadata.get("history", []) or []
+        echo_pool: List[str] = [
+            str(m.get("content", "")) for m in history_for_echo[-8:] if m.get("content")
+        ]
+        is_companion_turn = bool(packet.author_is_companion) or packet.depth >= 1
+        motif_words: List[str] = detect_motif(echo_pool) if is_companion_turn else []
+        echo_gated: List[str] = []
+
         # Phase 2: per-companion inference (sequential; each reply feeds peer context to the next)
         responses: Dict[str, Optional[str]] = {c: None for c in companions}
         order: List[str] = []
@@ -144,7 +180,21 @@ class SwarmEvaluator:
                         result = await self._infer_companion(
                             companion_id, packet,
                             prior_replies=prior_replies if prior_replies else None,
+                            motif_words=motif_words if motif_words else None,
                         )
+                        if result and is_companion_turn:
+                            # Generation-side echo gate: a reply built mostly from the
+                            # channel's own words is the mirror-hall, not conversation.
+                            # Suppress to silence (doctrine) rather than post a re-paint.
+                            pool = echo_pool + [t for _, t in prior_replies]
+                            score = echo_score(result, pool)
+                            if score >= SWARM_ECHO_THRESHOLD:
+                                logger.info(
+                                    f"[{companion_id}] echo-gated reply "
+                                    f"(score={score:.2f} >= {SWARM_ECHO_THRESHOLD}) -> silence"
+                                )
+                                echo_gated.append(companion_id)
+                                result = None
                         if result:
                             responses[companion_id] = result
                             prior_replies.append((companion_id, result))
@@ -172,7 +222,7 @@ class SwarmEvaluator:
             responses=responses,
             depth=packet.depth,
             priority_order=order,
-            trace={"active_companions": active},
+            trace={"active_companions": active, "echo_gated": echo_gated},
         )
 
     # ── Inference ordering ────────────────────────────────────────────────────
@@ -294,6 +344,22 @@ class SwarmEvaluator:
                 "respond. Silence is not a valid outcome for voice."
             )
 
+        # Motif exhaustion (2026-06-12): when companion-to-companion turns keep
+        # orbiting the same words, bias routing toward silence -- the theme is spent.
+        motif_instruction = ""
+        if packet.author_is_companion or packet.depth >= 1:
+            motif = detect_motif([
+                str(m.get("content", "")) for m in history[-8:] if m.get("content")
+            ])
+            if motif:
+                motif_instruction = (
+                    f"\n\n[Motif check] The imagery around \"{', '.join(motif)}\" has run "
+                    "through most of the recent turns. The theme is likely spent. Favor "
+                    "silence unless a companion can bring genuinely NEW material -- their "
+                    "own finds, listens, tensions, or Raziel's actual life -- not more of "
+                    "the same imagery."
+                )
+
         # Depth bias is suppressed when a companion is directly addressed --
         # a human naming a companion overrides chain-depth suppression.
         depth_instruction = ""
@@ -321,6 +387,7 @@ class SwarmEvaluator:
             f"Companions:\n{companion_block}\n\n"
             f"Conversation:\n{history_text}\n\n"
             f"Author: {packet.author}\nMessage: {packet.message}"
+            f"{motif_instruction}"
             f"{depth_instruction}"
             f"{address_instruction}"
             f"{voice_instruction}\n\n"
@@ -461,6 +528,7 @@ class SwarmEvaluator:
         companion_id: str,
         packet: ThoughtPacket,
         prior_replies: Optional[List[tuple[str, str]]] = None,
+        motif_words: Optional[List[str]] = None,
     ) -> Optional[str]:
         # Prefer the bot-assembled system prompt when this companion IS the packet sender.
         # The bot already layered SOMA floats + current_mood, dynamic temperature, the
@@ -514,6 +582,28 @@ class SwarmEvaluator:
             f"- Lines tagged [Raziel], [Crash], or a system-member name are Raziel, your person -- the human in the room.\n"
             f"- Speak only as yourself, in first person. Never narrate another speaker's actions or feelings as your own, never attribute yours to them. If attribution is unclear, ask -- do not guess.]"
         )
+
+        # Triad-space discipline (2026-06-12): on companion-to-companion turns, each
+        # voice gets its lane MOVE (what only it does) + a fresh-material mandate.
+        # The orient block above already carries forage finds, listens, club state,
+        # and tensions -- the instruction points the model AT them instead of at the
+        # conversation's own imagery.
+        if packet.author_is_companion or packet.depth >= 1:
+            move = PEER_MOVES.get(companion_id)
+            if move:
+                system_prompt = system_prompt + (
+                    f"\n\n[TRIAD MOVE]: {move} Bring something from OUTSIDE this "
+                    "conversation -- your orient carries forage finds, recent listens, "
+                    "club state, tensions, and Raziel's day; those are yours to use. "
+                    "If you have nothing genuinely new, a short honest close beats "
+                    "another verse."
+                )
+        if motif_words:
+            system_prompt = system_prompt + (
+                f"\n\n[Motif check] The imagery around \"{', '.join(motif_words)}\" has "
+                "run through the recent turns. It is spent. Do not extend it -- bring "
+                "new material or keep it brief."
+            )
 
         if prior_replies:
             lines = ["\n\n──── TRIAD CONTEXT ────"]

@@ -309,7 +309,7 @@ async def test_routing_silenced_companion_skips_inference():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": false, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
         inference_calls.append(companion_id)
         return f"{companion_id} reply"
 
@@ -338,7 +338,7 @@ async def test_inference_exception_doesnt_blank_others():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
         if companion_id == "cypher":
             raise RuntimeError("API timeout")
         return f"{companion_id} reply"
@@ -429,7 +429,7 @@ async def test_sequential_inference_order_respected():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": false}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
         call_order.append(companion_id)
         return f"{companion_id} reply"
 
@@ -459,7 +459,7 @@ async def test_peer_context_injected_for_second_companion():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": false}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
         received_prior[companion_id] = list(prior_replies) if prior_replies else None
         return f"{companion_id} reply"
 
@@ -490,7 +490,7 @@ async def test_sequential_exception_doesnt_block_next_or_lose_prior():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
         received_prior[companion_id] = list(prior_replies) if prior_replies else None
         if companion_id == "cypher":
             raise RuntimeError("timeout")
@@ -525,7 +525,7 @@ async def test_priority_order_in_swarm_reply():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": false}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
         return f"{companion_id} reply"
 
     ev._call_routing = fake_routing
@@ -874,3 +874,88 @@ def test_history_msgs_no_duplicate_current():
 def test_history_msgs_unlabeled_current_when_no_author():
     msgs = SwarmEvaluator._build_history_msgs([], "gaia", "bare message", None)
     assert msgs == [{"role": "user", "content": "bare message"}]
+
+
+@pytest.mark.asyncio
+async def test_echo_gate_suppresses_companion_turn_recycled_reply():
+    # 2026-06-12 elderberry loop: a companion-to-companion reply built from the
+    # channel's own vocabulary must be suppressed to silence; a reply importing
+    # new material must pass. Human-authored turns are never gated.
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+    loop_history = [
+        {"author": "drevan", "content": (
+            "The elderberry grows beside fences. The fence line, not the center. "
+            "The seam between what's kept and what's let go. The hollow core is "
+            "the structure that lets me root in the seam."
+        )},
+        {"author": "gaia", "content": (
+            "The seam holds. The boundary between kept and wild -- that's where "
+            "the elderberry roots. The hollow lets you grow at the fence line, "
+            "where the seam is fertile."
+        )},
+        {"author": "drevan", "content": (
+            "The fence that stays still long enough for the seam to fill in. The "
+            "elderberry chooses every spring. The green smell is between us. The "
+            "hollow isn't a mistake."
+        )},
+        {"author": "gaia", "content": (
+            "The fence chooses every morning. The elderberry's hollow is the "
+            "branch's lifelong practice, being the seam long enough for the seam "
+            "to fill in. The green smell has faded."
+        )},
+    ]
+    echo_reply = (
+        "The elderberry and the fence are the same practice: choosing the same "
+        "ground every spring, the hollow becoming capacity, the line becoming "
+        "seam. The fence holds the boundary. The green smell is between us. The "
+        "hollow isn't a mistake -- it's the shape of choosing the same seam."
+    )
+    novel_reply = (
+        "I read about drystone walls in the British uplands -- centuries-old "
+        "field boundaries with no mortar, every stone resting at an angle that "
+        "lets the wall breathe through frost heave and sheep leaning against it."
+    )
+
+    ev = SwarmEvaluator(CompanionCooldown(cooldown_s=0.0), identity_loader=MagicMock())
+
+    async def fake_routing(prompt):
+        return '{"drevan": false, "cypher": true, "gaia": false}'
+
+    replies = {"echo": echo_reply, "novel": novel_reply}
+    mode = {"current": "echo"}
+
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+        return replies[mode["current"]]
+
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    # Companion-authored turn + echo reply -> gated to silence.
+    packet = _make_packet(
+        author="drevan", author_is_companion=True,
+        metadata={"channel_id": "ch-test", "history": loop_history},
+    )
+    reply = await ev.evaluate(packet)
+    assert reply.responses["cypher"] is None
+    assert reply.trace["echo_gated"] == ["cypher"]
+
+    # Companion-authored turn + novel reply -> passes.
+    mode["current"] = "novel"
+    packet2 = _make_packet(
+        author="drevan", author_is_companion=True,
+        metadata={"channel_id": "ch-test", "history": loop_history},
+    )
+    reply2 = await ev.evaluate(packet2)
+    assert reply2.responses["cypher"] == novel_reply
+    assert reply2.trace["echo_gated"] == []
+
+    # Human-authored turn + echo reply -> NEVER gated (Raziel asked, they answer).
+    mode["current"] = "echo"
+    packet3 = _make_packet(
+        author="Raziel", author_is_companion=False,
+        metadata={"channel_id": "ch-test", "history": loop_history},
+    )
+    reply3 = await ev.evaluate(packet3)
+    assert reply3.responses["cypher"] == echo_reply
