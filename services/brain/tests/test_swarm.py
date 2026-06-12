@@ -837,3 +837,40 @@ async def test_model_status_reports_effective_and_cache_flag():
     # No halseth client -> no override read, no cache entry written.
     assert status["cached"] is False
     assert status["ttl_remaining_s"] == 0.0
+
+
+# ── history labeling (2026-06-12 attribution scramble) ──────────────────────
+
+def test_history_msgs_label_every_speaker():
+    msgs = SwarmEvaluator._build_history_msgs(
+        [
+            {"author": "Raziel", "content": "Dre listen: https://x"},
+            {"author": "cypher", "content": "I heard it all the way through."},
+            {"author": "drevan", "content": "my own earlier words"},
+            {"author": "Magpie", "content": "a front speaking"},
+        ],
+        "drevan",
+        "did you catch the name of the song?",
+        "Raziel",
+    )
+    assert msgs[0] == {"role": "user", "content": "[Raziel]: Dre listen: https://x"}
+    assert msgs[1] == {"role": "user", "content": "[Cypher]: I heard it all the way through."}
+    # Own messages stay untagged assistant turns.
+    assert msgs[2] == {"role": "assistant", "content": "my own earlier words"}
+    # Non-companion, non-owner speakers (PK fronts, guests) keep their name.
+    assert msgs[3] == {"role": "user", "content": "[Magpie]: a front speaking"}
+    # The triggering message is labeled like the rest.
+    assert msgs[4] == {"role": "user", "content": "[Raziel]: did you catch the name of the song?"}
+
+
+def test_history_msgs_no_duplicate_current():
+    msgs = SwarmEvaluator._build_history_msgs(
+        [{"author": "Raziel", "content": "hello"}], "drevan", "hello", "Raziel",
+    )
+    assert len(msgs) == 1
+    assert msgs[0]["content"] == "[Raziel]: hello"
+
+
+def test_history_msgs_unlabeled_current_when_no_author():
+    msgs = SwarmEvaluator._build_history_msgs([], "gaia", "bare message", None)
+    assert msgs == [{"role": "user", "content": "bare message"}]

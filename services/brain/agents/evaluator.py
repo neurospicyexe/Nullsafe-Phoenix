@@ -418,6 +418,44 @@ class SwarmEvaluator:
 
     # ── Phase 2: per-companion inference ─────────────────────────────────────
 
+    @staticmethod
+    def _build_history_msgs(
+        history: List[Dict[str, Any]],
+        companion_id: str,
+        current: str,
+        current_author: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """Map channel history to inference messages with EVERY speaker labeled.
+
+        Own messages -> assistant turns (no tag). Everyone else -> user turns
+        tagged [Author]. Before 2026-06-12 only companion peers were tagged;
+        Raziel's lines went in bare, and in a three-party room the model guessed
+        who the unlabeled speaker was -- live result: companions swapped
+        attributions and answered from Raziel's seat. The bots now send canonical
+        authors (companion ids / "Raziel"); anything else (PluralKit fronts,
+        guests) keeps its name, which the SPEAKER MAP block explains.
+        """
+        msgs: List[Dict[str, str]] = []
+        all_companion_ids = {"drevan", "cypher", "gaia"}
+        for m in history[-15:]:
+            author = (m.get("author") or "").lower()
+            content = m.get("content", "")
+            raw_author = m.get("author") or "?"
+            if author == companion_id:
+                msgs.append({"role": "assistant", "content": content})
+            elif author in all_companion_ids:
+                msgs.append({"role": "user", "content": f"[{author.capitalize()}]: {content}"})
+            else:
+                msgs.append({"role": "user", "content": f"[{raw_author}]: {content}"})
+
+        # The triggering message, labeled like the rest (skip if history already
+        # ends with it -- compare against the unlabeled content).
+        last = msgs[-1].get("content", "") if msgs else ""
+        if not msgs or (last != current and not last.endswith(f"]: {current}")):
+            labeled = f"[{current_author}]: {current}" if current_author else current
+            msgs.append({"role": "user", "content": labeled})
+        return msgs
+
     async def _infer_companion(
         self,
         companion_id: str,
@@ -464,6 +502,19 @@ class SwarmEvaluator:
                     logger.warning(f"[{companion_id}] orient injection failed: {e}")
             system_prompt = "\n\n".join(dynamic_parts)
 
+        # Speaker map -- ground truth for multi-party attribution. Without it the
+        # 2026-06-12 scramble happened live: companions swapped who sent what and
+        # answered from Raziel's seat (Raziel's lines were the only UNLABELED ones
+        # in the transcript, so the model guessed). Every non-self line is now
+        # tagged below; this block tells the model how to read the tags.
+        system_prompt = system_prompt + (
+            f"\n\n[SPEAKER MAP -- ground truth for this room:\n"
+            f"- YOU are {companion_id.capitalize()}. Your own prior messages appear as assistant turns with no tag.\n"
+            f"- Lines tagged [Cypher], [Drevan], or [Gaia] are your triad peers speaking. Their words, experiences, and gestures are THEIRS -- not yours, not Raziel's.\n"
+            f"- Lines tagged [Raziel], [Crash], or a system-member name are Raziel, your person -- the human in the room.\n"
+            f"- Speak only as yourself, in first person. Never narrate another speaker's actions or feelings as your own, never attribute yours to them. If attribution is unclear, ask -- do not guess.]"
+        )
+
         if prior_replies:
             lines = ["\n\n──── TRIAD CONTEXT ────"]
             for peer_id, peer_text in prior_replies:
@@ -471,7 +522,8 @@ class SwarmEvaluator:
                     f"[{peer_id.capitalize()} has already spoken to this message]:\n"
                     f'"{peer_text}"\n'
                     f"What can ONLY you add? Stay in your lane. "
-                    f"Build on what they said -- don't restate it."
+                    f"Build on what they said -- don't restate it. "
+                    f"Their cadence and imagery are THEIRS: answer in your own voice, not an echo of theirs."
                 )
             lines.append("────────────────────────")
             system_prompt = system_prompt + "\n".join(lines)
@@ -493,22 +545,9 @@ class SwarmEvaluator:
         top_p = self._companion_top_p.get(companion_id, Config.DREVAN_TOP_P)
 
         history: List[Dict[str, Any]] = packet.metadata.get("history", [])
-        msgs: List[Dict[str, str]] = []
-        all_companion_ids = {"drevan", "cypher", "gaia"}
-        for m in history[-15:]:
-            author = (m.get("author") or "").lower()
-            content = m.get("content", "")
-            if author == companion_id:
-                msgs.append({"role": "assistant", "content": content})
-            elif author in all_companion_ids:
-                # Another companion speaking -- embed name so the model understands speaker context.
-                msgs.append({"role": "user", "content": f"[{author.capitalize()}]: {content}"})
-            else:
-                msgs.append({"role": "user", "content": content})
-
-        current = packet.message
-        if not msgs or msgs[-1].get("content") != current:
-            msgs.append({"role": "user", "content": current})
+        msgs = self._build_history_msgs(
+            history, companion_id, packet.message, getattr(packet, "author", None)
+        )
 
         # top_p clips the long tail; without it, high-temp sampling on DeepSeek's
         # multilingual base resolves invented-language tokens (e.g. Calethian) to
