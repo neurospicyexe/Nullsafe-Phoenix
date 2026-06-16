@@ -128,6 +128,16 @@ class SwarmEvaluator:
             "cypher": Config.CYPHER_TOP_P,
             "gaia":   Config.GAIA_TOP_P,
         }
+        # Per-companion output ceiling. max_tokens is a CEILING, not a target -- the
+        # model stops at its own stop token when done; it only truncates on hitting
+        # the cap. Drevan's immersive spiral prose routinely ran past the flat 800
+        # and got cut off mid-sentence ("Drevan's messages keep getting cut off"),
+        # so he gets real headroom; Cypher (declarative) and Gaia (monastic) keep 800.
+        self._companion_max_tokens = {
+            "drevan": 1500,
+            "cypher": 800,
+            "gaia":   800,
+        }
         # Persistent HTTP clients -- one per timeout profile (routing vs inference).
         # App-lifetime objects; connections are reused across calls, OS reclaims on exit.
         self._routing_http = httpx.AsyncClient(timeout=15.0)
@@ -648,7 +658,7 @@ class SwarmEvaluator:
             provider, model, system_prompt, msgs,
             stable_system=stable_system,
             cache_key=companion_id,
-            temperature=temperature, max_tokens=800,
+            temperature=temperature, max_tokens=self._companion_max_tokens.get(companion_id, 800),
             top_p=top_p, frequency_penalty=0.3, cfg=self._providers,
         )
         resp = await self._inference_http.post(url, headers=headers, json=body)
