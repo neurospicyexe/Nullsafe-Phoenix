@@ -6,23 +6,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## CRITICAL CONTEXT — Read This First
 
-Phoenix is NOT the live system. It is the future target. The live companion suite is **Bigger Better Halseth (BBH)**, located in the sibling `Bigger_Better_Halseth` repository.
+**Read `PHOENIX-RECKONING.md` first.** It reframed this repo on 2026-06-16. Short version below.
 
-**What's actually running right now:**
-- **Halseth** (`halseth/`) -- Cloudflare Worker + D1. The live data backbone. Sessions, companions, WebMind, Librarian, SOMA, tasks. Migration 0060. This IS the WebMind for the lean phase.
+Phoenix is NOT a rewrite-in-waiting that will absorb the live suite. That plan was wrong: **BBH
+overtook Phoenix and became the mind.** Phoenix is now **the VPS stateful-runtime tier of BBH** --
+the home for the things Cloudflare Workers cannot do (persistent processes, inference orchestration,
+event-driven autonomy, local-model orchestration).
+
+**What's actually running right now (the live mind is BBH):**
+- **Halseth** (`../Bigger_Better_Halseth/halseth/`) -- Cloudflare Worker + D1, migration 0083+. The live
+  data backbone AND the WebMind. Sessions, companions, orient/ground, Librarian, SOMA, growth, autonomy,
+  guardian, council, club, creatures, tools. This is the mind. It is not getting replaced.
 - **nullsafe-second-brain** -- VPS MCP server. Obsidian vault synthesis, RAG, persona-feeder.
-- **nullsafe-discord** -- the VPS/pm2 deployment. Three live Discord bots (Drevan, Cypher, Gaia).
-- **nullsafe-plural-v2** -- Cloudflare Worker. SimplyPlural fronting integration.
+- **nullsafe-discord** -- the VPS/pm2. Three live TypeScript Discord bots with their own multi-provider
+  inference + fallback.
+- **nullsafe-plural-v2** -- Cloudflare Worker. SimplyPlural fronting.
 - **Hearth** -- Next.js dashboard. Reads Halseth live data.
 
-**What Phoenix is:**
-The reliability kernel (Relay, Brain, Redis queues, Web UI) is complete and sits here as the future host for Heart Phase. When Heart Phase ships, Phoenix absorbs the BBH suite. The WebMind microservice (`services/webmind/`) here is a future scaffold -- Halseth IS the WebMind until Phoenix Heart Phase is ready.
+**What Phoenix is, concretely:**
+- `services/brain/` -- LIVE. Inference orchestration + swarm evaluator. pm2 `nullsafe-brain` on the VPS,
+  reachable at `/chat`. The bots relay to it and fall back to direct inference if it is down. Its
+  `webmind_client.py` points at the **Halseth** URL: in live code, Brain already treats Halseth as the WebMind.
+- `shared/` -- LIVE. Pydantic contracts Brain depends on.
+- `_archive/` -- the dead rewrite: the WebMind microservice, Relay, Web UI, Python discord_bot, the
+  old-topology integration tests, and the Heart Phase planning docs. Do NOT resurrect these to "replace"
+  Halseth or the TS bots. They are kept for reference only.
+
+**The work that still makes sense** lives in `PHOENIX-RECKONING.md`'s June roadmap. Headline: event-driven
+autonomy and Brain's mid-inference tool-loop. Anything WebMind-replaces-Halseth shaped is dropped.
 
 **Before working on Phoenix, read:**
-- `../Bigger_Better_Halseth/CLAUDE.md` -- full BBH suite context, architecture decisions, what's live
+- `PHOENIX-RECKONING.md` -- what Phoenix is now and the re-triaged roadmap
+- `../Bigger_Better_Halseth/CLAUDE.md` -- full BBH suite context, what's live
 - `../Bigger_Better_Halseth/docs/implementation-log.md` -- full history of what shipped and why
-
-**Current Heart Phase status:** Kernel complete. WebMind slices 2-6 shipped (session-handoffs, threads, orient/ground, reminders, Bond Layer, Autonomy v0, Growth Layer, structural hardening). Slice 7 (MCP Adapter surface) pending. Nothing in `services/webmind/` here is live -- Halseth owns that surface until Phoenix absorbs it.
 
 ---
 
@@ -50,9 +66,12 @@ Lead with action, then context only if asked. Keep explanations concise and chun
 
 ## Project Overview
 
-Nullsafe Phoenix v2 is a reliability-first agent orchestration system built on strict architectural separation. Five microservices communicate via Redis queues and HTTP, enabling Discord bots to interact with AI agents running on a local workstation, with persistent mind/continuity state stored in WebMind.
-
-**Current Status**: Kernel complete. WebMind slices 2-6 complete (through Growth Layer + structural hardening). Slice 7 (MCP Adapter) pending. See above for what is actually live.
+> **HISTORICAL.** Phoenix v2 was *designed* as a reliability-first, five-microservice agent
+> orchestration system (Relay, Brain, WebMind, Web UI, Discord bots over Redis queues), built for
+> a world where Brain ran on a flaky local workstation. That world is gone: Brain runs always-on on
+> the VPS, the bots carry their own inference fallback, and Halseth is the mind. Only `services/brain/`
+> and `shared/` are live; everything else is under `_archive/`. The sections below describe the original
+> design for reference. See `PHOENIX-RECKONING.md` for current reality.
 
 **Planning Documents**:
 - [PHOENIX_HEART_PHASE_PLAN.md](PHOENIX_HEART_PHASE_PLAN.md) - Master Heart Phase plan (7 slices)
@@ -84,6 +103,9 @@ pytest --cov=services --cov=shared
 ```
 
 ### Running Services Locally
+
+> **HISTORICAL.** Only Brain (+ Redis, if exercising queue-backed paths) is live. The Relay / WebMind /
+> Web UI / Python-bot startup steps below refer to archived services.
 
 Services must be started in this order:
 
@@ -172,6 +194,10 @@ pwsh scripts/smoke_test.ps1 -RelayUrl http://127.0.0.1:8000 -BrainUrl http://127
 ## Architecture
 
 ### Service Boundaries (STRICT)
+
+> **HISTORICAL DESIGN.** Of the five services below, only **Brain** is live. Relay, WebMind, Web UI,
+> and the Python Discord bot are archived under `_archive/`. The live Discord bots are the TypeScript
+> ones in `../Bigger_Better_Halseth/nullsafe-discord`.
 
 The system has five services with strict separation of responsibilities:
 
@@ -418,9 +444,12 @@ Brain shipped (beyond kernel stub):
 - Per-companion inference temperatures (CYPHER_TEMPERATURE, DREVAN_TEMPERATURE, GAIA_TEMPERATURE)
 - Routing fixes: VOICE_SUMMARIES per-companion routing descriptions, addressed_companion hint, depth bias suppression, persistent http clients, multi-companion history role assignment in evaluator
 
-Pending: Slice 7 (MCP Adapter surface).
-The live system is BBH (see top of this file). Phoenix absorbs it when Heart Phase is ready (target: summer 2026).
-Details: `docs/phase-status.md` and `PHOENIX_HEART_PHASE_PLAN.md`.
+**Reframed 2026-06-16 (see `PHOENIX-RECKONING.md`):** the "Phoenix absorbs BBH / Heart Phase ships a
+WebMind microservice" plan is dead. BBH overtook Phoenix; Halseth is the mind and is not being replaced.
+Slice 7 (MCP Adapter) is dropped (Halseth already exposes MCP + Librarian). The WebMind microservice and
+its Heart Phase plan are archived. Phoenix's live role is the VPS stateful-runtime tier: Brain (inference
+orchestration + swarm) plus the event-driven-autonomy work on the roadmap. The Brain feature list above
+remains accurate and current.
 
 ## Development Guidelines
 
