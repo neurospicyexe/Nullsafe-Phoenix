@@ -204,7 +204,10 @@ class TestChatEndpoint:
         assert repro_stamp["packet_id"] == packet.packet_id
         assert repro_stamp["agent_id"] == "gaia"
         assert "identity_version" in repro_stamp
-        assert len(repro_stamp["identity_version"]) == 16  # SHA256 first 16 chars
+        # SHA256 first 16 chars; the identity-kernel overlay (mig 0067) appends
+        # "+k<kernel_hash>" when a kernel is loaded (loader._apply_kernel_overlay),
+        # so assert on the base hash, not the full length.
+        assert len(repro_stamp["identity_version"].split("+k")[0]) == 16
         assert "timestamp" in repro_stamp
         assert "thread_routing" in repro_stamp
 
