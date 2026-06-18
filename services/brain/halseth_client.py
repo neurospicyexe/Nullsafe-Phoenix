@@ -439,7 +439,9 @@ def format_orient_context(orient: Optional[dict]) -> str:
     parts: list[str] = []
     try:
         now_cst = datetime.now(_CST) if _CST else datetime.utcnow()
-        tz_label = "CST" if _CST else "UTC"
+        # Derive the abbreviation from the actual date (CDT in summer, CST in winter) rather
+        # than hardcoding "CST" year-round -- mirrors formatRecentContext() in librarian.ts.
+        tz_label = (now_cst.strftime("%Z") or "CST") if _CST else "UTC"
         parts.append(f"[Now: {now_cst.strftime('%A, %B %d, %Y at %I:%M %p')} {tz_label}]")
     except Exception:
         pass
