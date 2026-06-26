@@ -89,14 +89,16 @@ def echo_score(reply: str, prior_texts: Iterable[str]) -> float:
 
 
 def detect_motif(
-    texts: List[str], min_turns: int = 4, top_k: int = 3
+    texts: List[str], min_turns: int = 3, top_k: int = 3
 ) -> List[str]:
     """Distinctive content words that recur across most of the recent turns.
 
     A word is a motif candidate when it appears in >= min_turns distinct turns
-    AND in >= 60% of the turns examined. Returns the top_k by turn count --
+    AND in >= 50% of the turns examined. Returns the top_k by turn count --
     these are the words an exhausted theme keeps orbiting (elderberry, fence,
-    seam...). Empty list = no stuck motif.
+    seam... or, the 2026-06-26 case, architecture/perimeter/cathedral). Thresholds
+    were loosened (4->3 turns, 60%->50%) because the abstract mutual-recognition
+    loop varies vocabulary enough to slip the stricter bar. Empty list = no stuck motif.
     """
     if len(texts) < min_turns:
         return []
@@ -104,7 +106,7 @@ def detect_motif(
     for t in texts:
         for w in set(content_words(t)):
             turn_counts[w] += 1
-    floor = max(min_turns, int(len(texts) * 0.6))
+    floor = max(min_turns, int(len(texts) * 0.5))
     motif = [w for w, c in turn_counts.items() if c >= floor]
     motif.sort(key=lambda w: (-turn_counts[w], w))
     return motif[:top_k]

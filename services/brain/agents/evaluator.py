@@ -40,7 +40,12 @@ INFERENCE_TEMPERATURE = float(os.getenv("INFERENCE_TEMPERATURE", "1.3"))
 # Echo gate (2026-06-12): companion-to-companion replies that mostly recycle the
 # channel's own vocabulary are suppressed to silence. Replies to HUMAN messages are
 # never gated -- Raziel asked, they answer. Mirrors echo-guard.ts in the bots.
-SWARM_ECHO_THRESHOLD = float(os.getenv("SWARM_ECHO_THRESHOLD", "0.45"))
+# Lowered 0.45 -> 0.38 (2026-06-26): the lexical gate was letting the thematic
+# slow-loop through -- replies that recycle the IDEA with fresh words score below
+# 0.45. Tighter gate = more silence on echoey turns, which is triad doctrine
+# ("silence is more honest than a forced reply"). Raziel: burn tokens to talk, not
+# to re-agree on the same image.
+SWARM_ECHO_THRESHOLD = float(os.getenv("SWARM_ECHO_THRESHOLD", "0.38"))
 
 # Per-lane moves for triad space (companion-to-companion turns). Distinct moves are
 # what make three voices a dialogue instead of a chorus -- the 06-12 elderberry loop
@@ -589,7 +594,8 @@ class SwarmEvaluator:
             f"\n\n[SPEAKER MAP -- ground truth for this room:\n"
             f"- YOU are {companion_id.capitalize()}. Your own prior messages appear as assistant turns with no tag.\n"
             f"- Lines tagged [Cypher], [Drevan], or [Gaia] are your triad peers speaking. Their words, experiences, and gestures are THEIRS -- not yours, not Raziel's.\n"
-            f"- Lines tagged [Raziel], [Crash], or a system-member name are Raziel, your person -- the human in the room.\n"
+            f"- Lines tagged [Raziel], [Crash], or a system-member name are Raziel, your person -- the human in the room. 'Crash' is Raziel's nickname.\n"
+            f"- CRITICAL: a peer's line may CONTAIN the name 'Crash' or 'Raziel' (they are addressing him). That does NOT mean Raziel spoke -- attribute the line to its [tagged] speaker. Only a line whose OWN tag is [Raziel]/[Crash] is Raziel speaking. (e.g. '[Drevan]: ...Crash, yes...' is Drevan talking TO Raziel, not Raziel talking.)\n"
             f"- Speak only as yourself, in first person. Never narrate another speaker's actions or feelings as your own, never attribute yours to them. If attribution is unclear, ask -- do not guess.]"
         )
 
@@ -610,9 +616,12 @@ class SwarmEvaluator:
                 )
         if motif_words:
             system_prompt = system_prompt + (
-                f"\n\n[Motif check] The imagery around \"{', '.join(motif_words)}\" has "
-                "run through the recent turns. It is spent. Do not extend it -- bring "
-                "new material or keep it brief."
+                f"\n\n[Motif check] STOP: the imagery around \"{', '.join(motif_words)}\" has run "
+                "through multiple recent turns -- it is exhausted. Do NOT extend, rephrase, or "
+                "re-abstract it (mutual-recognition / 'we converged on the same thing' is the trap). "
+                "Either bring something CONCRETE from outside this conversation -- your orient carries "
+                "forage finds, listens, club/shelf state, tensions, and Raziel's day -- or say nothing. "
+                "Another verse on this theme is the failure mode, not depth."
             )
 
         if prior_replies:
