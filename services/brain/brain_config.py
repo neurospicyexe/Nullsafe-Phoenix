@@ -71,6 +71,34 @@ class Config:
     MAX_SWARM_DEPTH:       int = int(os.getenv("MAX_SWARM_DEPTH",       "6"))
     DEPTH_BIAS_THRESHOLD:  int = int(os.getenv("DEPTH_BIAS_THRESHOLD",  "2"))
 
+    # Progress brake (2026-06-26): structural anti-loop on the SHAPE of the turn,
+    # the level above the lexical echo gate. The "be selective" prompt bias was a
+    # soft suggestion the model ignored mid-agreement, so all three piled on every
+    # round and restated one chord in fresh words (the mutual-recognition loop the
+    # lexical guard can't see). These are HARD caps. Depth 0 (answering Raziel) is
+    # never capped here -- group chat with Raziel stays open; companions recursing
+    # into their own thread collapse to turn-taking. See agents/progress_brake.py.
+    # PROGRESS_BRAKE=false disables the whole lever in one restart if it bites wrong.
+    PROGRESS_BRAKE: bool = os.getenv("PROGRESS_BRAKE", "true").lower() == "true"
+    BRAKE_SOLO_DEPTH:     int = int(os.getenv("BRAKE_SOLO_DEPTH",     "2"))
+    BRAKE_PAIR_DEPTH:     int = int(os.getenv("BRAKE_PAIR_DEPTH",     "1"))
+    BRAKE_HANDBACK_TURNS: int = int(os.getenv("BRAKE_HANDBACK_TURNS", "4"))
+    # Loop-pressure (channel mean-adjacent cosine, read live from Halseth echo_metrics)
+    # tightens the caps. Mirror halseth ECHO_COSINE_WARN / _RED so both organs agree.
+    BRAKE_PRESSURE_WARN: float = float(os.getenv("BRAKE_PRESSURE_WARN", "0.66"))
+    BRAKE_PRESSURE_RED:  float = float(os.getenv("BRAKE_PRESSURE_RED",  "0.82"))
+    BRAKE_PRESSURE_TTL_S: int = int(os.getenv("BRAKE_PRESSURE_TTL_S", "90"))
+    # Channels exempt from the floor-handback (comma-separated channel IDs). Handback
+    # returns the mic to Raziel after a companion-only streak -- meaningless in a pure
+    # inter-companion channel where Raziel is not a participant, so list those here.
+    # The speaker cap (turn-taking) STILL applies everywhere; only the handback is
+    # skipped. Default empty = handback active in every channel.
+    BRAKE_HANDBACK_EXEMPT_CHANNELS: set = {
+        c.strip()
+        for c in os.getenv("BRAKE_HANDBACK_EXEMPT_CHANNELS", "").split(",")
+        if c.strip()
+    }
+
     @staticmethod
     def validate():
         """Validate required config on startup."""

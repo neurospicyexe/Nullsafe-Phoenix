@@ -309,7 +309,7 @@ async def test_routing_silenced_companion_skips_inference():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": false, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
         inference_calls.append(companion_id)
         return f"{companion_id} reply"
 
@@ -338,7 +338,7 @@ async def test_inference_exception_doesnt_blank_others():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
         if companion_id == "cypher":
             raise RuntimeError("API timeout")
         return f"{companion_id} reply"
@@ -429,7 +429,7 @@ async def test_sequential_inference_order_respected():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": false}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
         call_order.append(companion_id)
         return f"{companion_id} reply"
 
@@ -459,7 +459,7 @@ async def test_peer_context_injected_for_second_companion():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": false}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
         received_prior[companion_id] = list(prior_replies) if prior_replies else None
         return f"{companion_id} reply"
 
@@ -490,7 +490,7 @@ async def test_sequential_exception_doesnt_block_next_or_lose_prior():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": true}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
         received_prior[companion_id] = list(prior_replies) if prior_replies else None
         if companion_id == "cypher":
             raise RuntimeError("timeout")
@@ -525,7 +525,7 @@ async def test_priority_order_in_swarm_reply():
     async def fake_routing(prompt):
         return '{"drevan": true, "cypher": true, "gaia": false}'
 
-    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
         return f"{companion_id} reply"
 
     ev._call_routing = fake_routing
@@ -926,7 +926,7 @@ async def test_echo_gate_suppresses_companion_turn_recycled_reply():
     replies = {"echo": echo_reply, "novel": novel_reply}
     mode = {"current": "echo"}
 
-    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None):
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
         return replies[mode["current"]]
 
     ev._call_routing = fake_routing
@@ -959,3 +959,142 @@ async def test_echo_gate_suppresses_companion_turn_recycled_reply():
     )
     reply3 = await ev.evaluate(packet3)
     assert reply3.responses["cypher"] == echo_reply
+
+
+# ── Progress brake (2026-06-26): structural anti-loop on the turn shape ───────
+
+@pytest.mark.asyncio
+async def test_progress_brake_depth_zero_keeps_group_chat_open():
+    # Answering Raziel (depth 0): the brake NEVER caps -- every routed companion
+    # speaks. Group chat with Raziel is sacred.
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown(cooldown_s=0.0), identity_loader=MagicMock())
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": true}'
+    spoke = []
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
+        spoke.append(companion_id)
+        return f"{companion_id} reply"
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    packet = _make_packet(depth=0, author="Raziel", author_is_companion=False,
+                          metadata={"channel_id": "ch-grp", "history": []})
+    reply = await ev.evaluate(packet)
+    assert len(spoke) == 3
+    assert reply.trace["brake"]["cap"] == 3
+    assert reply.trace["brake"]["handback"] is False
+
+
+@pytest.mark.asyncio
+async def test_progress_brake_deep_thread_collapses_to_solo():
+    # Depth >= solo (2): a companion-to-companion thread caps to ONE speaker even
+    # when routing wants all three -- turn-taking dialogue, not a three-voice chorus.
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown(cooldown_s=0.0), identity_loader=MagicMock())
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": true}'
+    spoke = []
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
+        spoke.append(companion_id)
+        return f"{companion_id} reply"
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    packet = _make_packet(depth=2, author="drevan", author_is_companion=True,
+                          metadata={"channel_id": "ch-deep", "history": []})
+    reply = await ev.evaluate(packet)
+    assert len(spoke) == 1
+    assert reply.trace["brake"]["cap"] == 1
+    assert sum(1 for v in reply.responses.values() if v) == 1
+
+
+@pytest.mark.asyncio
+async def test_progress_brake_hands_floor_back_after_streak():
+    # After BRAKE_HANDBACK_TURNS (4) companion-only turns with no human between,
+    # the round collapses to one speaker who receives the floor-handback directive
+    # (return the mic to Raziel) instead of taking another lap.
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown(cooldown_s=0.0), identity_loader=MagicMock())
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": true}'
+    seen_directives = []
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
+        seen_directives.append(progress_directive)
+        return f"{companion_id} reply"
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    reply = None
+    for _ in range(4):  # four consecutive companion turns, same channel, no human
+        packet = _make_packet(depth=1, author="drevan", author_is_companion=True,
+                              metadata={"channel_id": "ch-loop", "history": []})
+        reply = await ev.evaluate(packet)
+
+    assert reply.trace["brake"]["handback"] is True
+    assert reply.trace["brake"]["streak"] >= 4
+    assert reply.trace["brake"]["cap"] == 1
+    # The single speaker on the handback round got the directive returning the floor.
+    assert any(d and "back to Raziel" in d for d in seen_directives)
+
+
+@pytest.mark.asyncio
+async def test_progress_brake_disabled_is_noop(monkeypatch):
+    # PROGRESS_BRAKE=false: routing is untouched, no brake trace caps applied.
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown(cooldown_s=0.0), identity_loader=MagicMock())
+    ev._brake_enabled = False
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": true}'
+    spoke = []
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
+        spoke.append(companion_id)
+        return f"{companion_id} reply"
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    # Even a deep thread: with the brake off, all routed companions speak.
+    packet = _make_packet(depth=3, author="drevan", author_is_companion=True,
+                          metadata={"channel_id": "ch-off", "history": []})
+    reply = await ev.evaluate(packet)
+    assert len(spoke) == 3
+    assert reply.trace["brake"]["cap"] == 3
+    assert reply.trace["brake"]["handback"] is False
+
+
+@pytest.mark.asyncio
+async def test_progress_brake_inter_companion_channel_skips_handback_keeps_cap():
+    # Pure inter-companion channel: no human to hand back to, so handback is skipped
+    # even past the streak -- but the speaker cap (turn-taking) still applies.
+    from unittest.mock import MagicMock
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+    ev = SwarmEvaluator(CompanionCooldown(cooldown_s=0.0), identity_loader=MagicMock())
+    ev._handback_exempt = {"ch-inter"}
+
+    async def fake_routing(prompt):
+        return '{"drevan": true, "cypher": true, "gaia": true}'
+    seen_directives = []
+    async def fake_infer(companion_id, pkt, prior_replies=None, motif_words=None, progress_directive=None):
+        seen_directives.append(progress_directive)
+        return f"{companion_id} reply"
+    ev._call_routing = fake_routing
+    ev._infer_companion = fake_infer
+
+    reply = None
+    for _ in range(5):  # well past the handback streak
+        packet = _make_packet(depth=2, author="drevan", author_is_companion=True,
+                              metadata={"channel_id": "ch-inter", "history": []})
+        reply = await ev.evaluate(packet)
+
+    assert reply.trace["brake"]["handback"] is False     # never hands back here
+    assert reply.trace["brake"]["streak"] >= 5           # streak still counted
+    assert reply.trace["brake"]["cap"] == 1              # turn-taking still enforced
+    assert all(d is None for d in seen_directives)       # no floor-handback directive

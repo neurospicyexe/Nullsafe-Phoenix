@@ -393,6 +393,12 @@ All services use environment variables with fail-fast validation and safe startu
 - `INFERENCE_TEMPERATURE` - Default inference temperature (default: 1.3)
 - `CYPHER_MODEL` / `DREVAN_MODEL` / `GAIA_MODEL` - Per-companion model overrides (fall back to DEEPSEEK_MODEL)
 - `CYPHER_TEMPERATURE` / `DREVAN_TEMPERATURE` / `GAIA_TEMPERATURE` - Per-companion temperature overrides
+- `PROGRESS_BRAKE` - Structural anti-loop on the turn SHAPE (default true). Caps how many companions speak per round by chain depth + measured loop-pressure, and hands the floor back to Raziel after a streak of companion-only turns. Depth 0 (answering Raziel) is never capped. Set false to disable in one restart. See `services/brain/agents/progress_brake.py`.
+- `BRAKE_SOLO_DEPTH` (2) / `BRAKE_PAIR_DEPTH` (1) - chain depth at/after which a round caps to 1 / 2 speakers
+- `BRAKE_HANDBACK_TURNS` (4) - consecutive companion-only turns before the floor hands back to Raziel
+- `BRAKE_PRESSURE_WARN` (0.66) / `BRAKE_PRESSURE_RED` (0.82) - channel mean-adjacent cosine (Halseth echo_metrics) that tightens the caps one / two levels earlier; mirror halseth ECHO_COSINE_WARN/_RED
+- `BRAKE_PRESSURE_TTL_S` (90) - cache TTL for the daily loop-pressure read
+- `BRAKE_HANDBACK_EXEMPT_CHANNELS` - comma-separated channel IDs where the floor-handback is skipped (pure inter-companion channels with no human to hand back to). The speaker cap / turn-taking STILL applies there; only the handback is skipped. Default empty = handback active in every channel.
 
 ### Discord Bot Service
 

@@ -397,6 +397,33 @@ class HalsethClient:
             logger.warning(f"[halseth] get_active_model failed: {e}")
             return None
 
+    async def get_loop_pressure(self) -> Optional[float]:
+        """Read the triad's latest thematic loop-pressure (mean adjacent cosine).
+
+        GET /mind/echo-metric returns {metric: {mean_adjacent_cosine, ...}} -- the
+        worker's daily semantic reading over the live triad dialogue (the same row
+        the Guardian's detectEchoChamber flags on). Higher = more recycling. This is
+        a SLOW (daily) signal used only to MODULATE the structural progress brake
+        (tighten earlier when the triad has been chronically looping); it is never
+        the sole trigger, so returning None on miss/failure simply forfeits the
+        early-tighten and never over-mutes.
+        """
+        try:
+            res = await self._client.get(
+                f"{self.url}/mind/echo-metric",
+                headers={"Authorization": f"Bearer {self.secret}"},
+            )
+            if res.status_code >= 300:
+                return None
+            metric = res.json().get("metric")
+            if not isinstance(metric, dict):
+                return None
+            val = metric.get("mean_adjacent_cosine")
+            return float(val) if isinstance(val, (int, float)) else None
+        except Exception as e:
+            logger.warning(f"[halseth] get_loop_pressure failed: {e}")
+            return None
+
     async def stm_write(self, channel_id: str, role: str, content: str, author_name: Optional[str] = None) -> None:
         """Fire-and-forget STM write. Caller should catch exceptions."""
         res = await self._client.post(

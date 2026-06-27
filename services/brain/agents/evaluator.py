@@ -17,6 +17,14 @@ from services.brain.brain_config import Config
 from services.brain.config.channel_config import get_companions_for_channel
 from services.brain.agents.cooldown import CompanionCooldown
 from services.brain.agents.echo_guard import detect_motif, echo_score
+from services.brain.agents.progress_brake import (
+    BrakeConfig,
+    StallTracker,
+    apply_cap,
+    handback_directive,
+    should_handback,
+    speaker_cap,
+)
 from services.brain.agents.providers import (
     MODEL_REGISTRY,
     ProviderConfig,
@@ -148,6 +156,26 @@ class SwarmEvaluator:
         self._routing_http = httpx.AsyncClient(timeout=15.0)
         self._inference_http = httpx.AsyncClient(timeout=30.0)
 
+        # Progress brake (2026-06-26): structural anti-loop on the SHAPE of the turn
+        # (how many speak, when the floor returns to Raziel) -- the level above the
+        # lexical echo gate, and the only lever a same-idea/new-words loop can't slip.
+        self._brake_enabled = Config.PROGRESS_BRAKE
+        self._brake_cfg = BrakeConfig(
+            solo_depth=Config.BRAKE_SOLO_DEPTH,
+            pair_depth=Config.BRAKE_PAIR_DEPTH,
+            handback_turns=Config.BRAKE_HANDBACK_TURNS,
+            pressure_warn=Config.BRAKE_PRESSURE_WARN,
+            pressure_red=Config.BRAKE_PRESSURE_RED,
+        )
+        self._stall = StallTracker()
+        # Channels where the floor-handback is skipped (pure inter-companion spaces
+        # with no human to hand back to). The speaker cap still applies there --
+        # turn-taking is the right brake for a room that is companions-only.
+        self._handback_exempt = Config.BRAKE_HANDBACK_EXEMPT_CHANNELS
+        # Loop-pressure (the triad's daily echo metric) is global, not per-channel,
+        # and changes daily -- one short TTL cache spares a Halseth round-trip per turn.
+        self._pressure_cache: tuple[float, Optional[float]] = (0.0, None)
+
     async def evaluate(self, packet: ThoughtPacket) -> SwarmReply:
         channel_id = packet.metadata.get("channel_id") or packet.thread_id
         companions = get_companions_for_channel(channel_id)
@@ -163,6 +191,43 @@ class SwarmEvaluator:
 
         # Phase 1: routing -- who should speak? (temp=ROUTING_TEMPERATURE, cheap)
         routing = await self._decide_speakers(packet, companions)
+
+        # Progress brake (2026-06-26): cap how many speak by depth + measured
+        # loop-pressure, and decide whether the floor must hand back to Raziel.
+        # This shapes the TURN, which a same-idea/new-words loop cannot evade --
+        # depth 0 stays full triad (group chat with Raziel) unless pressure is high;
+        # deep companion threads collapse to turn-taking. Disabled => pure no-op.
+        handback_active = False
+        handback_streak = 0
+        brake_cap = 3
+        brake_pressure: Optional[float] = None
+        if self._brake_enabled:
+            is_comp = bool(packet.author_is_companion) or packet.depth >= 1
+            handback_streak = self._stall.observe(channel_id, is_comp, time.monotonic())
+            brake_pressure = await self._get_loop_pressure()
+            routed = [c for c, v in routing.items() if v]
+            if routed:
+                priority = self._determine_order(packet, routed)
+                brake_cap = speaker_cap(packet.depth, brake_pressure, self._brake_cfg)
+                # Handback only where Raziel is present -- skipped in pure
+                # inter-companion channels (the cap below still enforces turn-taking).
+                handback_active = (
+                    is_comp
+                    and channel_id not in self._handback_exempt
+                    and should_handback(handback_streak, brake_pressure, self._brake_cfg)
+                )
+                if handback_active:
+                    brake_cap = 1  # one voice closes the lap and returns the floor
+                if brake_cap < 3:
+                    before = routing
+                    routing = apply_cap(routing, priority, brake_cap)
+                    dropped = [c for c in before if before[c] and not routing[c]]
+                    if dropped or handback_active:
+                        logger.info(
+                            f"[swarm] progress brake: depth={packet.depth} "
+                            f"pressure={brake_pressure} streak={handback_streak} "
+                            f"cap={brake_cap} handback={handback_active} dropped={dropped}"
+                        )
 
         # Apply cooldown before inference to avoid paying for suppressed companions
         routing_placeholder: Dict[str, Optional[str]] = {
@@ -196,6 +261,10 @@ class SwarmEvaluator:
                             companion_id, packet,
                             prior_replies=prior_replies if prior_replies else None,
                             motif_words=motif_words if motif_words else None,
+                            progress_directive=(
+                                handback_directive(handback_streak)
+                                if handback_active else None
+                            ),
                         )
                         if result and is_companion_turn:
                             # Generation-side echo gate: a reply built mostly from the
@@ -237,7 +306,16 @@ class SwarmEvaluator:
             responses=responses,
             depth=packet.depth,
             priority_order=order,
-            trace={"active_companions": active, "echo_gated": echo_gated},
+            trace={
+                "active_companions": active,
+                "echo_gated": echo_gated,
+                "brake": {
+                    "cap": brake_cap,
+                    "handback": handback_active,
+                    "streak": handback_streak,
+                    "pressure": brake_pressure,
+                },
+            },
         )
 
     # ── Inference ordering ────────────────────────────────────────────────────
@@ -272,6 +350,24 @@ class SwarmEvaluator:
                 remaining.insert(0, "drevan")
 
         return addressed + remaining
+
+    async def _get_loop_pressure(self) -> Optional[float]:
+        """Latest triad loop-pressure (global daily echo metric), TTL-cached. None
+        when there is no Halseth client, no reading, or on failure -- the brake then
+        falls back to its structural defaults and never over-mutes on a stale read."""
+        if not self._halseth_clients:
+            return None
+        now = time.monotonic()
+        if now < self._pressure_cache[0]:
+            return self._pressure_cache[1]
+        client = next(iter(self._halseth_clients.values()))
+        try:
+            pressure = await client.get_loop_pressure()
+        except Exception as e:
+            logger.warning(f"[swarm] loop-pressure read failed: {e}")
+            pressure = None
+        self._pressure_cache = (now + Config.BRAKE_PRESSURE_TTL_S, pressure)
+        return pressure
 
     # ── Phase 1: routing ──────────────────────────────────────────────────────
 
@@ -544,6 +640,7 @@ class SwarmEvaluator:
         packet: ThoughtPacket,
         prior_replies: Optional[List[tuple[str, str]]] = None,
         motif_words: Optional[List[str]] = None,
+        progress_directive: Optional[str] = None,
     ) -> Optional[str]:
         # Prefer the bot-assembled system prompt when this companion IS the packet sender.
         # The bot already layered SOMA floats + current_mood, dynamic temperature, the
@@ -623,6 +720,12 @@ class SwarmEvaluator:
                 "forage finds, listens, club/shelf state, tensions, and Raziel's day -- or say nothing. "
                 "Another verse on this theme is the failure mode, not depth."
             )
+
+        # Floor-handback (progress brake): the triad has taken too many turns among
+        # themselves -- this single chosen speaker is directed to return the floor to
+        # Raziel rather than take another lap. Injected last so it has the final word.
+        if progress_directive:
+            system_prompt = system_prompt + progress_directive
 
         if prior_replies:
             lines = ["\n\n──── TRIAD CONTEXT ────"]
