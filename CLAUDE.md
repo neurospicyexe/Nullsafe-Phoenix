@@ -18,7 +18,7 @@ event-driven autonomy, local-model orchestration).
   data backbone AND the WebMind. Sessions, companions, orient/ground, Librarian, SOMA, growth, autonomy,
   guardian, council, club, creatures, tools. This is the mind. It is not getting replaced.
 - **nullsafe-second-brain** -- VPS MCP server. Obsidian vault synthesis, RAG, persona-feeder.
-- **nullsafe-discord** -- the VPS/pm2. Three live TypeScript Discord bots with their own multi-provider
+- **nullsafe-discord** -- the VPS (pm2). Three live TypeScript Discord bots with their own multi-provider
   inference + fallback.
 - **nullsafe-plural-v2** -- Cloudflare Worker. SimplyPlural fronting.
 - **Hearth** -- Next.js dashboard. Reads Halseth live data.
@@ -58,7 +58,7 @@ After security fixes or schema changes specifically, run the full test suite imm
 
 ## Deployment / Infrastructure
 
-Brain runs on the VPS (the VPS/pm2), not the workstation. Always confirm the deployment target path before assuming local vs remote execution. When in doubt, check `pm2 list` via SSH before running any deploy step.
+Brain runs on the VPS (pm2), not the workstation. Always confirm the deployment target path before assuming local vs remote execution. When in doubt, check `pm2 list` via SSH before running any deploy step.
 
 ## Communication Style
 
